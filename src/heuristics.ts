@@ -209,9 +209,10 @@ function perpOpens(state: UserState): TradeEvent[] {
 }
 
 /**
- * Leverage climbing across consecutive opens — loss-chasing with size. Ratio-based
- * so it's robust to Avantis's (unverified) leverage scaling. Severity escalates to
- * high when a losing close sits between the two opens (the classic tilt sequence).
+ * Leverage climbing across consecutive opens — loss-chasing with size. Compares
+ * normalized leverage (verified 1e10-scaled, e.g. 20x) between consecutive opens.
+ * Severity escalates to high when a losing close sits between the two opens (the
+ * classic tilt sequence), now that closes carry real realizedPnlUsd.
  */
 function leverageEscalation(state: UserState, now: number): Signal | null {
   const opens = perpOpens(state);
@@ -249,8 +250,8 @@ function leverageEscalation(state: UserState, now: number): Signal | null {
 
 /**
  * THE revenge-trading signal (highest severity): opening a new position within
- * minutes of a liquidation. Dormant until liquidation events are decoded
- * (see src/perps/avantis.ts pollLiquidations); the logic is complete.
+ * minutes of a liquidation. Live — liquidations are decoded from Avantis
+ * TradingCallbacks LimitExecuted (orderType == 2) in src/perps/avantis.ts.
  */
 function postLiquidationReentry(state: UserState, now: number): Signal | null {
   const liquidations = state.trades.filter((t) => t.isPerp && t.isLiquidation);
