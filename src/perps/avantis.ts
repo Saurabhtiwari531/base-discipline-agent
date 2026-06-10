@@ -139,18 +139,14 @@ function buildClose(
   };
 }
 
-/** Resolve the scan window, mirroring the spot watcher's bounded scan. */
-async function nextRange(
-  client: BaseClient,
-  state: UserState,
-): Promise<{ from: bigint; to: bigint } | null> {
-  const latest = await client.getBlockNumber();
-  let from =
-    state.lastPerpBlockScanned !== undefined ? state.lastPerpBlockScanned + 1n : latest;
-  if (latest < from) {
-    state.lastPerpBlockScanned = latest;
-    return null;
-  }
+/** Pure scan-window calc, mirroring the spot watcher's bounded scan. First poll
+ *  (lastScanned undefined) starts at the tip — we don't backfill history. */
+export function perpScanRange(
+  latest: bigint,
+  lastScanned?: bigint,
+): { from: bigint; to: bigint } | null {
+  let from = lastScanned !== undefined ? lastScanned + 1n : latest;
+  if (latest < from) return null;
   if (latest - from > MAX_BLOCKS_PER_POLL) from = latest - MAX_BLOCKS_PER_POLL;
   return { from, to: latest };
 }
@@ -169,46 +165,51 @@ async function blockTimesMs(
   return out;
 }
 
-/**
- * Poll Avantis open/close/liquidation events for the watched wallet since the
- * last scan. Returns perp TradeEvents (oldest first) and advances
- * state.lastPerpBlockScanned. Throws on RPC error (caller wraps in try/catch).
- */
-export async function pollAvantis(
+/** OPENS for one wallet — server-side filtered by the indexed trader (cheap). */
+export async function fetchTraderOpens(
   client: BaseClient,
-  state: UserState,
+  wallet: string,
+  from: bigint,
+  to: bigint,
 ): Promise<TradeEvent[]> {
-  const range = await nextRange(client, state);
-  if (!range) return [];
-  const wallet = state.wallet.toLowerCase();
-  const events: TradeEvent[] = [];
-
-  // OPENS — server-side filtered by indexed trader.
-  const openLogs = await client.getLogs({
+  const logs = await client.getLogs({
     address: AVANTIS_ADDRESSES.trading as `0x${string}`,
     event: MARKET_ORDER_INITIATED,
-    args: { trader: state.wallet as `0x${string}` },
-    fromBlock: range.from,
-    toBlock: range.to,
+    args: { trader: wallet as `0x${string}` },
+    fromBlock: from,
+    toBlock: to,
   });
-  for (const log of openLogs) {
+  const out: TradeEvent[] = [];
+  for (const log of logs) {
     const ev = decodeOpen(log);
-    if (ev) events.push(ev);
+    if (ev) out.push(ev);
   }
+  return out;
+}
 
-  // CLOSES + LIQUIDATIONS — scan callbacks, filter by trader after decode.
+/**
+ * CLOSES + LIQUIDATIONS for ALL traders in the block range, in one pass. The
+ * trader lives inside the event struct (not indexed), so this is a single global
+ * fetch the watcher does ONCE per cycle and then fans out by `event.wallet`.
+ * Each returned event has `wallet` set to the position's trader (lowercased).
+ */
+export async function fetchCallbackCloses(
+  client: BaseClient,
+  from: bigint,
+  to: bigint,
+): Promise<TradeEvent[]> {
   const [marketLogs, limitLogs] = await Promise.all([
     client.getLogs({
       address: AVANTIS_ADDRESSES.callbacks as `0x${string}`,
       event: MARKET_EXECUTED,
-      fromBlock: range.from,
-      toBlock: range.to,
+      fromBlock: from,
+      toBlock: to,
     }),
     client.getLogs({
       address: AVANTIS_ADDRESSES.callbacks as `0x${string}`,
       event: LIMIT_EXECUTED,
-      fromBlock: range.from,
-      toBlock: range.to,
+      fromBlock: from,
+      toBlock: to,
     }),
   ]);
 
@@ -217,8 +218,7 @@ export async function pollAvantis(
 
   for (const log of marketLogs) {
     const a = log.args as { t?: TradeStruct; open?: boolean; percentProfit?: bigint };
-    if (!a.t || a.t.trader.toLowerCase() !== wallet) continue;
-    if (a.open) continue; // opens handled above
+    if (!a.t || a.open) continue; // opens handled via fetchTraderOpens
     pending.push({
       t: a.t,
       pnl: a.percentProfit ?? 0n,
@@ -229,7 +229,7 @@ export async function pollAvantis(
   }
   for (const log of limitLogs) {
     const a = log.args as { t?: TradeStruct; orderType?: number; percentProfit?: bigint };
-    if (!a.t || a.t.trader.toLowerCase() !== wallet) continue;
+    if (!a.t) continue;
     const orderType = Number(a.orderType);
     if (orderType === LIMIT_ORDER_TYPE_OPEN) continue; // limit OPEN execution, not a close
     pending.push({
@@ -241,14 +241,35 @@ export async function pollAvantis(
     });
   }
 
-  if (pending.length > 0) {
-    const times = await blockTimesMs(client, new Set(pending.map((p) => p.block)));
-    for (const p of pending) {
-      events.push(buildClose(p.t, p.pnl, p.tx, times.get(p.block) ?? Date.now(), p.liq));
-    }
-  }
+  if (pending.length === 0) return [];
+  const times = await blockTimesMs(client, new Set(pending.map((p) => p.block)));
+  return pending.map((p) =>
+    buildClose(p.t, p.pnl, p.tx, times.get(p.block) ?? Date.now(), p.liq),
+  );
+}
 
+/**
+ * Convenience single-wallet poll (used by scripts/tests). Advances
+ * state.lastPerpBlockScanned. The live watcher instead shares ONE
+ * fetchCallbackCloses() call across all users per cycle — see src/index.ts.
+ */
+export async function pollAvantis(
+  client: BaseClient,
+  state: UserState,
+): Promise<TradeEvent[]> {
+  const latest = await client.getBlockNumber();
+  const range = perpScanRange(latest, state.lastPerpBlockScanned);
+  if (!range) {
+    state.lastPerpBlockScanned = latest;
+    return [];
+  }
+  const wallet = state.wallet.toLowerCase();
+  const [opens, allCloses] = await Promise.all([
+    fetchTraderOpens(client, state.wallet, range.from, range.to),
+    fetchCallbackCloses(client, range.from, range.to),
+  ]);
   state.lastPerpBlockScanned = range.to;
-  events.sort((a, b) => a.timestamp - b.timestamp);
-  return events;
+  return [...opens, ...allCloses.filter((e) => e.wallet === wallet)].sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
 }

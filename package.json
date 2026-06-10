@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "gen:keys": "tsx src/genKeys.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=20"

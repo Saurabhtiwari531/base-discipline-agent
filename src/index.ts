@@ -25,7 +25,7 @@ import {
   generateRefusal,
 } from "./interventions.js";
 import { createBaseClient, getPortfolioSnapshot, pollWallet } from "./watcher.js";
-import { pollAvantis } from "./perps/avantis.js";
+import { fetchCallbackCloses, fetchTraderOpens, perpScanRange } from "./perps/avantis.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 const DAILY_CHECKIN_HOUR = Number(process.env.DAILY_CHECKIN_HOUR ?? 20);
@@ -229,6 +229,9 @@ function startLoops(): void {
 /** Liquidations we've already debriefed, keyed `${wallet}:${txHash}` (dedup). */
 const liquidationsHandled = new Set<string>();
 
+/** Shared Avantis scan cursor — perps are fetched once per cycle, not per user. */
+let perpCursor: bigint | undefined;
+
 /** Merge new trades in chronological order and cap memory. */
 function appendTrades(state: UserState, incoming: TradeEvent[]): void {
   if (incoming.length === 0) return;
@@ -251,25 +254,55 @@ async function handleLiquidations(state: UserState, events: TradeEvent[]): Promi
   }
 }
 
+/**
+ * Perp poll for the whole cohort: ONE callbacks fetch per cycle, fanned out by
+ * trader. Opens stay per-wallet (indexed, cheap). Advances the shared cursor
+ * only after the global fetch succeeds, so a failure simply retries next cycle.
+ */
+async function pollPerps(client: ReturnType<typeof createBaseClient>): Promise<void> {
+  const active = [...users.values()].filter((s) => !s.paused);
+  if (active.length === 0) return;
+  const latest = await client.getBlockNumber();
+  const range = perpScanRange(latest, perpCursor);
+  if (!range) return;
+
+  // Single global fetch of closes/liquidations for the range, shared by all users.
+  const allCloses = await fetchCallbackCloses(client, range.from, range.to);
+
+  for (const state of active) {
+    try {
+      const wallet = state.wallet.toLowerCase();
+      const opens = await fetchTraderOpens(client, state.wallet, range.from, range.to);
+      const mine = allCloses.filter((e) => e.wallet === wallet);
+      const events = [...opens, ...mine].sort((a, b) => a.timestamp - b.timestamp);
+      appendTrades(state, events);
+      await handleLiquidations(state, events);
+    } catch (err) {
+      console.error("[watcher] perp fan-out failed:", err instanceof Error ? err.message : err);
+    }
+  }
+  perpCursor = range.to;
+}
+
 async function pollAllWallets(client: ReturnType<typeof createBaseClient>): Promise<void> {
   const now = Date.now();
+
+  // Perps once per cycle (single shared callbacks fetch). Isolated so a perp
+  // failure never blocks spot polls, snapshots, or heuristics.
+  try {
+    await pollPerps(client);
+  } catch (err) {
+    console.error("[watcher] perp cycle failed:", err instanceof Error ? err.message : err);
+  }
+
   for (const state of users.values()) {
     if (state.paused) continue;
 
-    // Spot trades (DEX routers). Isolated so a failure here doesn't skip perps.
+    // Spot trades (DEX routers).
     try {
       appendTrades(state, await pollWallet(client, state));
     } catch (err) {
       console.error("[watcher] spot poll failed:", err instanceof Error ? err.message : err);
-    }
-
-    // Perp trades (Avantis). Liquidation post-mortem fires before rate-limited rules.
-    try {
-      const perpEvents = await pollAvantis(client, state);
-      appendTrades(state, perpEvents);
-      await handleLiquidations(state, perpEvents);
-    } catch (err) {
-      console.error("[watcher] perp poll failed:", err instanceof Error ? err.message : err);
     }
 
     // Portfolio snapshot for drawdown velocity.
