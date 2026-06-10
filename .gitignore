@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+*.local
+# XMTP local DB / encryption artifacts
+*.db3
+*.db3-*
+xmtp-*.db3*
+.data/
+dist/
+*.log
+.DS_Store

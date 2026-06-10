@@ -1,0 +1,27 @@
+{
+  "name": "base-discipline-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI trading-discipline agent for Base App. Watches a wallet and intervenes when the trader breaks their own plan. Never a signal provider.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "gen:keys": "tsx src/genKeys.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@xmtp/agent-sdk": "^2.3.0",
+    "dotenv": "^17.4.2",
+    "viem": "^2.52.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
