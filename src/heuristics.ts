@@ -24,6 +24,8 @@ const CHURN_WINDOW_MS = 2 * HOUR_MS;
 const CHURN_DISTINCT_TOKENS = 4;
 const DRAWDOWN_WINDOW_MS = 6 * HOUR_MS;
 const DRAWDOWN_PCT = 0.2; // 20% drop in portfolio value within the window
+const LEVERAGE_ESCALATION_FACTOR = 1.5; // leverage ratio jump between consecutive opens
+const REENTRY_WINDOW_MS = 30 * 60 * 1000; // "minutes after a liquidation" window
 
 /** Whether a signal type is allowed to fire again given the 4h cooldown. */
 export function canFire(state: UserState, type: SignalType, now: number): boolean {
@@ -198,6 +200,84 @@ function ruleBreakPositionSize(state: UserState, now: number): Signal | null {
   };
 }
 
+// --- perps rules (CURRENT TASK: Avantis) ---
+
+function perpOpens(state: UserState): TradeEvent[] {
+  return state.trades.filter(
+    (t) => t.isPerp && t.perpAction === "open" && typeof t.leverage === "number",
+  );
+}
+
+/**
+ * Leverage climbing across consecutive opens — loss-chasing with size. Ratio-based
+ * so it's robust to Avantis's (unverified) leverage scaling. Severity escalates to
+ * high when a losing close sits between the two opens (the classic tilt sequence).
+ */
+function leverageEscalation(state: UserState, now: number): Signal | null {
+  const opens = perpOpens(state);
+  if (opens.length < 2) return null;
+  const latest = opens[opens.length - 1];
+  const prev = opens[opens.length - 2];
+  if (!latest || !prev || !prev.leverage || !latest.leverage) return null;
+  if (latest.leverage < prev.leverage * LEVERAGE_ESCALATION_FACTOR) return null;
+
+  const losingCloseBetween = state.trades.some(
+    (t) =>
+      t.isPerp &&
+      t.perpAction === "close" &&
+      typeof t.realizedPnlUsd === "number" &&
+      t.realizedPnlUsd < 0 &&
+      t.timestamp > prev.timestamp &&
+      t.timestamp < latest.timestamp,
+  );
+
+  return {
+    type: "leverage_escalation",
+    severity: losingCloseBetween ? "high" : "medium",
+    wallet: state.wallet,
+    detectedAt: now,
+    summary: `Leverage went from ${prev.leverage}x to ${latest.leverage}x${
+      losingCloseBetween ? " right after a losing close" : ""
+    }.`,
+    data: {
+      previousLeverage: prev.leverage,
+      latestLeverage: latest.leverage,
+      afterLoss: losingCloseBetween,
+    },
+  };
+}
+
+/**
+ * THE revenge-trading signal (highest severity): opening a new position within
+ * minutes of a liquidation. Dormant until liquidation events are decoded
+ * (see src/perps/avantis.ts pollLiquidations); the logic is complete.
+ */
+function postLiquidationReentry(state: UserState, now: number): Signal | null {
+  const liquidations = state.trades.filter((t) => t.isPerp && t.isLiquidation);
+  if (liquidations.length === 0) return null;
+  const lastLiq = liquidations[liquidations.length - 1];
+  if (!lastLiq) return null;
+
+  const reentry = state.trades.find(
+    (t) =>
+      t.isPerp &&
+      t.perpAction === "open" &&
+      t.timestamp > lastLiq.timestamp &&
+      t.timestamp - lastLiq.timestamp <= REENTRY_WINDOW_MS,
+  );
+  if (!reentry) return null;
+
+  const minutes = Math.round((reentry.timestamp - lastLiq.timestamp) / 60000);
+  return {
+    type: "post_liquidation_reentry",
+    severity: "high",
+    wallet: state.wallet,
+    detectedAt: now,
+    summary: `New position opened ${minutes} minute(s) after a liquidation.`,
+    data: { minutesAfterLiquidation: minutes, liquidationTx: lastLiq.txHash },
+  };
+}
+
 const RULES: ((state: UserState, now: number) => Signal | null)[] = [
   frequencySpike,
   sizeEscalation,
@@ -206,6 +286,8 @@ const RULES: ((state: UserState, now: number) => Signal | null)[] = [
   drawdownVelocity,
   ruleBreakMaxTrades,
   ruleBreakPositionSize,
+  leverageEscalation,
+  postLiquidationReentry,
 ];
 
 /**

@@ -16,14 +16,16 @@ import "dotenv/config";
 import { Agent, createSigner, createUser, filter } from "@xmtp/agent-sdk";
 import type { Conversation } from "@xmtp/node-sdk";
 import { isAddress } from "viem";
-import { DEFAULT_RULES, type UserState } from "./types.js";
+import { DEFAULT_RULES, type TradeEvent, type UserState } from "./types.js";
 import { runHeuristics } from "./heuristics.js";
 import {
   generateDailyCheckIn,
   generateIntervention,
+  generateLiquidationPostMortem,
   generateRefusal,
 } from "./interventions.js";
 import { createBaseClient, getPortfolioSnapshot, pollWallet } from "./watcher.js";
+import { pollAvantis } from "./perps/avantis.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 const DAILY_CHECKIN_HOUR = Number(process.env.DAILY_CHECKIN_HOUR ?? 20);
@@ -224,32 +226,70 @@ function startLoops(): void {
   }, CHECKIN_INTERVAL_MS);
 }
 
+/** Liquidations we've already debriefed, keyed `${wallet}:${txHash}` (dedup). */
+const liquidationsHandled = new Set<string>();
+
+/** Merge new trades in chronological order and cap memory. */
+function appendTrades(state: UserState, incoming: TradeEvent[]): void {
+  if (incoming.length === 0) return;
+  state.trades.push(...incoming);
+  state.trades.sort((a, b) => a.timestamp - b.timestamp);
+  if (state.trades.length > MAX_TRADES_KEPT) {
+    state.trades.splice(0, state.trades.length - MAX_TRADES_KEPT);
+  }
+}
+
+/** Send a one-time structured post-mortem for each newly-seen liquidation. */
+async function handleLiquidations(state: UserState, events: TradeEvent[]): Promise<void> {
+  for (const event of events) {
+    if (!event.isLiquidation) continue;
+    const key = `${state.wallet}:${event.txHash}`;
+    if (liquidationsHandled.has(key)) continue;
+    liquidationsHandled.add(key);
+    const message = await generateLiquidationPostMortem(state, event);
+    await sendTo(state.conversationId, message);
+  }
+}
+
 async function pollAllWallets(client: ReturnType<typeof createBaseClient>): Promise<void> {
   const now = Date.now();
   for (const state of users.values()) {
     if (state.paused) continue;
-    try {
-      const newTrades = await pollWallet(client, state);
-      if (newTrades.length > 0) {
-        state.trades.push(...newTrades);
-        if (state.trades.length > MAX_TRADES_KEPT) {
-          state.trades.splice(0, state.trades.length - MAX_TRADES_KEPT);
-        }
-      }
 
-      const snapshot = await getPortfolioSnapshot(client, state.wallet);
-      state.snapshots.push(snapshot);
+    // Spot trades (DEX routers). Isolated so a failure here doesn't skip perps.
+    try {
+      appendTrades(state, await pollWallet(client, state));
+    } catch (err) {
+      console.error("[watcher] spot poll failed:", err instanceof Error ? err.message : err);
+    }
+
+    // Perp trades (Avantis). Liquidation post-mortem fires before rate-limited rules.
+    try {
+      const perpEvents = await pollAvantis(client, state);
+      appendTrades(state, perpEvents);
+      await handleLiquidations(state, perpEvents);
+    } catch (err) {
+      console.error("[watcher] perp poll failed:", err instanceof Error ? err.message : err);
+    }
+
+    // Portfolio snapshot for drawdown velocity.
+    try {
+      state.snapshots.push(await getPortfolioSnapshot(client, state.wallet));
       if (state.snapshots.length > MAX_SNAPSHOTS_KEPT) {
         state.snapshots.splice(0, state.snapshots.length - MAX_SNAPSHOTS_KEPT);
       }
+    } catch (err) {
+      console.error("[watcher] snapshot failed:", err instanceof Error ? err.message : err);
+    }
 
+    // Heuristics decide WHEN; the LLM only words it.
+    try {
       for (const signal of runHeuristics(state, now)) {
         const message = await generateIntervention(signal, state.rules);
         await sendTo(state.conversationId, message);
       }
     } catch (err) {
-      // One wallet's failure must not stop the others.
-      console.error("[watcher] poll failed:", err instanceof Error ? err.message : err);
+      console.error("[watcher] heuristics failed:", err instanceof Error ? err.message : err);
     }
   }
 }

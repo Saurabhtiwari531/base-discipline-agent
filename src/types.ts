@@ -56,6 +56,16 @@ export interface TradeEvent {
   leverage?: number;
   /** True when this event came from a perps DEX (Avantis), not a spot DEX. */
   isPerp?: boolean;
+  /** Whether this perp event opened or closed a position. */
+  perpAction?: "open" | "close";
+  /** Avantis pair index (market id), for grouping a position's open/close. */
+  pairIndex?: number;
+  /** Collateral posted, in USD (USDC, 6dp). Best-effort; see avantis.ts notes. */
+  collateralUsd?: number;
+  /** Realized PnL in USD on a close. Only set when a callbacks event is decoded. */
+  realizedPnlUsd?: number;
+  /** True if this close was a forced liquidation (not a user-initiated close). */
+  isLiquidation?: boolean;
 }
 
 /** A point-in-time portfolio reading. ETH-only for now (see roadmap). */
@@ -84,8 +94,10 @@ export interface UserState {
   lastSignalAt: Partial<Record<SignalType, number>>;
   /** Timestamp (ms) of the last daily check-in, to enforce max 1/day. */
   lastDailyCheckInAt?: number;
-  /** Highest Base block we've already scanned for this wallet. */
+  /** Highest Base block we've already scanned for spot trades. */
   lastBlockScanned?: bigint;
+  /** Highest Base block we've already scanned for Avantis perp events. */
+  lastPerpBlockScanned?: bigint;
   /** When true, the user ran "stop" — suppress all proactive messages. */
   paused: boolean;
   onboardedAt: number;

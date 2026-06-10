@@ -9,7 +9,7 @@
  * crash the watcher loop — we fall back to a static line instead.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import type { Signal, SignalType, UserRules, UserState } from "./types.js";
+import type { Signal, SignalType, TradeEvent, UserRules, UserState } from "./types.js";
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
 
@@ -139,4 +139,37 @@ one concrete action that points back to their plan.`;
     text ??
     "I don't give buy, sell, or price calls — that's the one thing I'll never do, because it's what got both of us in trouble before. What does your own plan say about a setup like this? Re-read your rules and let those decide, not me."
   );
+}
+
+/**
+ * Liquidation post-mortem — a structured debrief sent once when a liquidation is
+ * detected. This is the one place we deliberately go past the 1-3 sentence limit:
+ * what happened, where it broke from the plan, and a concrete cooldown.
+ */
+export async function generateLiquidationPostMortem(
+  state: UserState,
+  liquidation: TradeEvent,
+): Promise<string> {
+  const lev = liquidation.leverage ? `${liquidation.leverage}x` : "leveraged";
+  const facts = [
+    `A ${lev} position was just liquidated (pair ${liquidation.pairIndex ?? "?"}).`,
+    typeof liquidation.realizedPnlUsd === "number"
+      ? `Realized loss: ~$${Math.abs(Math.round(liquidation.realizedPnlUsd))}.`
+      : "Collateral was lost.",
+    `Their plan: max ${state.rules.maxTradesPerDay} trades/day, no trading ${state.rules.noTradeStartHour}:00-${state.rules.noTradeEndHour}:00.`,
+  ].join(" ");
+
+  const prompt = `Write a brief liquidation post-mortem (a debrief, not a lecture). Facts: ${facts}
+Structure it as 3 short parts:
+1) What happened — one factual sentence.
+2) Where it deviated from their plan — one sentence (be specific to their rules).
+3) A concrete cooldown — tell them to stop trading for a set period (suggest 24 hours).
+Calm and direct. No blame, no market commentary, no predictions. Do NOT tell them what to trade next.`;
+  const text = await complete(prompt);
+  if (text) return text;
+  return [
+    `That position was liquidated — ${lev}, and the collateral is gone.`,
+    "This is the moment your plan was built for. The instinct now is to make it back fast; that instinct is exactly what turns one liquidation into an empty account.",
+    "Stop trading for 24 hours. No new positions today. Re-read your rules tomorrow before you do anything.",
+  ].join("\n\n");
 }
