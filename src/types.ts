@@ -113,7 +113,9 @@ export type SignalType =
   | "rule_break_position_size"
   // --- perps (CURRENT TASK) ---
   | "leverage_escalation"
-  | "post_liquidation_reentry";
+  | "post_liquidation_reentry"
+  // --- fund management ---
+  | "large_position_pct";
 
 export type Severity = "low" | "medium" | "high";
 

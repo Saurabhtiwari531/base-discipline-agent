@@ -3,8 +3,12 @@
  *
  * Approach: raw block scanning, matching transactions whose `to` is a known DEX
  * router. This is intentionally simple and WILL NOT scale past a handful of users
- * (see CLAUDE.md roadmap: move to an indexer). usdValue is a stub (0) until swap
- * logs are decoded / an indexer lands, so size-based heuristics stay dormant.
+ * (see CLAUDE.md roadmap: move to an indexer).
+ *
+ * USD estimation strategy (without an indexer):
+ *   1. Native ETH sent in the tx → tx.value * ethUsd
+ *   2. ERC20 Transfer from wallet → stablecoin amount (direct USD) or WETH * ethUsd
+ *   3. Falls back to 0 if neither is detected (unknown token swap).
  *
  * Every RPC call is wrapped by the caller in try/catch — one wallet's failed poll
  * must never crash the loop.
@@ -27,8 +31,35 @@ export const DEX_ROUTERS: Record<string, string> = {
   "0x6131b5fae19ea4f9d964eac0408e4408b66337b5": "KyberSwap MetaAggregationRouterV2",
 };
 
+// --- Known Base token addresses (all lowercase) ---
+const WETH = "0x4200000000000000000000000000000000000006";
+const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const USDT = "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2";
+const DAI  = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb";
+
+const TOKEN_SYMBOLS: Record<string, string> = {
+  [WETH]: "WETH",
+  [USDC]: "USDC",
+  [USDT]: "USDT",
+  [DAI]:  "DAI",
+};
+
+/** Stablecoin addresses → their decimal places. */
+const STABLECOIN_DECIMALS: Record<string, number> = {
+  [USDC]: 6,
+  [USDT]: 6,
+  [DAI]:  18,
+};
+
+const TRANSFER_TOPIC =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
 /** Cap on how many blocks we scan per poll, so a long gap can't lock the loop. */
 const MAX_BLOCKS_PER_POLL = 600n; // ~20 min of Base blocks (2s/block)
+
+// --- ETH price cache ---
+const ethPriceCache = { usd: 3000, fetchedAt: 0 };
+const PRICE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export function createBaseClient() {
   const rpcUrl = process.env.BASE_RPC_URL;
@@ -38,21 +69,36 @@ export function createBaseClient() {
   });
 }
 
-/**
- * The concrete viem client type for Base. Inferred rather than annotated as the
- * generic `PublicClient` because the Base (OP-stack) chain widens block/tx types.
- */
 export type BaseClient = ReturnType<typeof createBaseClient>;
 
 /**
- * Price feed STUB. Returns a hardcoded ETH/USD until a real feed is wired
- * (Coingecko / CDP). See CLAUDE.md "Known stubs / gaps".
+ * Fetch ETH/USD from Coingecko free API with a 5-minute in-process cache.
+ * On failure, returns the last known price (never 0) so portfolio math stays sane.
  */
 export async function fetchEthUsd(): Promise<number> {
-  return 3000;
+  const now = Date.now();
+  if (now - ethPriceCache.fetchedAt < PRICE_CACHE_TTL_MS) return ethPriceCache.usd;
+
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
+      { signal: AbortSignal.timeout(5000) },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { ethereum?: { usd?: number } };
+    const price = data?.ethereum?.usd;
+    if (typeof price === "number" && price > 0) {
+      ethPriceCache.usd = price;
+      ethPriceCache.fetchedAt = now;
+    }
+  } catch {
+    // Keep using last cached price — don't update fetchedAt so we retry next poll
+  }
+
+  return ethPriceCache.usd;
 }
 
-/** Read the wallet's native ETH balance and snapshot its (stub) USD value. */
+/** Read the wallet's native ETH balance and snapshot its USD value. */
 export async function getPortfolioSnapshot(
   client: BaseClient,
   wallet: string,
@@ -68,6 +114,78 @@ export async function getPortfolioSnapshot(
 }
 
 /**
+ * Estimate the USD notional of a DEX trade without an indexer.
+ *
+ * Strategy (in priority order):
+ *   1. Native ETH sent in the tx (tx.value) → value * ethUsd
+ *   2. ERC20 Transfer FROM the wallet in the receipt:
+ *      - stablecoin → direct USD amount
+ *      - WETH → amount * ethUsd
+ *   3. Returns 0 if we can't determine (unknown token, receiving side only, etc.)
+ *
+ * Also populates tokenInSymbol from what we detect.
+ */
+async function estimateTradeUsdValue(
+  client: BaseClient,
+  txHash: string,
+  wallet: string,
+  nativeValue: bigint,
+  ethUsd: number,
+): Promise<{ usdValue: number; tokenInSymbol?: string; tokenOutSymbol?: string }> {
+  // 1. Native ETH sent
+  if (nativeValue > 0n) {
+    const ethAmount = Number(formatEther(nativeValue));
+    if (ethAmount > 0.0001) {
+      return { usdValue: ethAmount * ethUsd, tokenInSymbol: "ETH" };
+    }
+  }
+
+  // 2. Decode ERC20 Transfer logs from the receipt
+  try {
+    const receipt = await client.getTransactionReceipt({
+      hash: txHash as `0x${string}`,
+    });
+
+    let tokenInSymbol: string | undefined;
+    let tokenOutSymbol: string | undefined;
+
+    for (const log of receipt.logs) {
+      if (log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) continue;
+      if (log.topics.length < 3) continue;
+
+      const token = log.address.toLowerCase();
+      const from = `0x${log.topics[1]!.slice(26)}`.toLowerCase();
+      const to   = `0x${log.topics[2]!.slice(26)}`.toLowerCase();
+
+      // Track token symbols for what the wallet sent / received
+      if (from === wallet && TOKEN_SYMBOLS[token]) tokenInSymbol = TOKEN_SYMBOLS[token];
+      if (to   === wallet && TOKEN_SYMBOLS[token]) tokenOutSymbol = TOKEN_SYMBOLS[token];
+
+      // Only price the outgoing leg (what the wallet spent)
+      if (from !== wallet) continue;
+
+      const rawValue = BigInt(log.data);
+
+      if (token in STABLECOIN_DECIMALS) {
+        const decimals = STABLECOIN_DECIMALS[token]!;
+        const usdValue = Number(rawValue) / 10 ** decimals;
+        return { usdValue, tokenInSymbol: TOKEN_SYMBOLS[token], tokenOutSymbol };
+      }
+
+      if (token === WETH) {
+        const ethAmount = Number(rawValue) / 1e18;
+        return { usdValue: ethAmount * ethUsd, tokenInSymbol: "WETH", tokenOutSymbol };
+      }
+    }
+
+    // Could not price it, but still return any symbols we found
+    return { usdValue: 0, tokenInSymbol, tokenOutSymbol };
+  } catch {
+    return { usdValue: 0 };
+  }
+}
+
+/**
  * Scan new blocks since state.lastBlockScanned for trades made by the watched
  * wallet against a known router. Returns new TradeEvents (oldest first) and
  * advances state.lastBlockScanned. Caller persists the events onto state.
@@ -80,7 +198,6 @@ export async function pollWallet(
   const wallet = state.wallet.toLowerCase();
 
   const latest = await client.getBlockNumber();
-  // First poll: start near the tip so we don't backfill the whole chain.
   let from = state.lastBlockScanned !== undefined ? state.lastBlockScanned + 1n : latest;
   if (latest < from) {
     state.lastBlockScanned = latest;
@@ -90,24 +207,38 @@ export async function pollWallet(
     from = latest - MAX_BLOCKS_PER_POLL;
   }
 
+  const ethUsd = await fetchEthUsd();
   const events: TradeEvent[] = [];
+
   for (let bn = from; bn <= latest; bn++) {
     const block = await client.getBlock({ blockNumber: bn, includeTransactions: true });
     const tsMs = Number(block.timestamp) * 1000;
+
     for (const tx of block.transactions) {
-      if (typeof tx === "string") continue; // safety: should be full txs here
+      if (typeof tx === "string") continue;
       if (tx.from.toLowerCase() !== wallet) continue;
       const to = tx.to?.toLowerCase();
       if (!to) continue;
       const routerName = DEX_ROUTERS[to];
       if (!routerName) continue;
+
+      const { usdValue, tokenInSymbol, tokenOutSymbol } = await estimateTradeUsdValue(
+        client,
+        tx.hash,
+        wallet,
+        tx.value ?? 0n,
+        ethUsd,
+      );
+
       events.push({
         txHash: tx.hash,
         timestamp: tsMs,
         wallet,
         router: to,
         routerName,
-        usdValue: 0, // STUB until swap-log decoding / indexer
+        tokenInSymbol,
+        tokenOutSymbol,
+        usdValue,
       });
     }
   }

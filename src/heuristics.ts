@@ -24,8 +24,12 @@ const CHURN_WINDOW_MS = 2 * HOUR_MS;
 const CHURN_DISTINCT_TOKENS = 4;
 const DRAWDOWN_WINDOW_MS = 6 * HOUR_MS;
 const DRAWDOWN_PCT = 0.2; // 20% drop in portfolio value within the window
-const LEVERAGE_ESCALATION_FACTOR = 1.5; // leverage ratio jump between consecutive opens
-const REENTRY_WINDOW_MS = 30 * 60 * 1000; // "minutes after a liquidation" window
+// Exported: reused by src/score.ts so the score and the live signals never drift.
+export const LEVERAGE_ESCALATION_FACTOR = 1.5; // leverage ratio jump between consecutive opens
+export const REENTRY_WINDOW_MS = 30 * 60 * 1000; // "minutes after a liquidation" window
+const LARGE_POSITION_PCT_MEDIUM = 0.15; // 15 % of portfolio triggers medium
+const LARGE_POSITION_PCT_HIGH = 0.25;   // 25 % of portfolio triggers high
+const MIN_PORTFOLIO_USD = 5_000;         // only meaningful above this threshold
 
 /** Whether a signal type is allowed to fire again given the 4h cooldown. */
 export function canFire(state: UserState, type: SignalType, now: number): boolean {
@@ -52,7 +56,7 @@ function tradesToday(state: UserState, now: number): TradeEvent[] {
 }
 
 /** True if the given local hour falls inside the user's no-trade window. */
-function inNoTradeWindow(hour: number, startHour: number, endHour: number): boolean {
+export function inNoTradeWindow(hour: number, startHour: number, endHour: number): boolean {
   if (startHour === endHour) return false;
   if (startHour < endHour) return hour >= startHour && hour < endHour;
   // window wraps past midnight, e.g. 22 -> 5
@@ -279,6 +283,40 @@ function postLiquidationReentry(state: UserState, now: number): Signal | null {
   };
 }
 
+/**
+ * Single position is a dangerous % of total portfolio.
+ *
+ * The pattern this encodes: traders with large accounts ($50k-$200k) feel each
+ * individual trade is "affordable" relative to their buffer. That feeling is the
+ * lie — the backup absorbs every loss until there is no backup. A $30k trade on a
+ * $100k account is 30% exposure; the absolute dollar number feeling "safe" is
+ * irrelevant.
+ *
+ * Requires real usdValue on trades (now live via watcher.ts price feed).
+ */
+function largePositionPct(state: UserState, now: number): Signal | null {
+  const latest = [...state.trades].reverse().find((t) => t.usdValue > 0);
+  if (!latest) return null;
+
+  const snap = state.snapshots[state.snapshots.length - 1];
+  if (!snap || snap.usdValue < MIN_PORTFOLIO_USD) return null;
+
+  const pct = latest.usdValue / snap.usdValue;
+  if (pct < LARGE_POSITION_PCT_MEDIUM) return null;
+
+  const severity = pct >= LARGE_POSITION_PCT_HIGH ? "high" : "medium";
+  const pctRounded = Math.round(pct * 100);
+
+  return {
+    type: "large_position_pct",
+    severity,
+    wallet: state.wallet,
+    detectedAt: now,
+    summary: `Last trade was $${Math.round(latest.usdValue)} — ${pctRounded}% of your $${Math.round(snap.usdValue)} portfolio.`,
+    data: { tradeUsd: latest.usdValue, portfolioUsd: snap.usdValue, pct },
+  };
+}
+
 const RULES: ((state: UserState, now: number) => Signal | null)[] = [
   frequencySpike,
   sizeEscalation,
@@ -289,6 +327,7 @@ const RULES: ((state: UserState, now: number) => Signal | null)[] = [
   ruleBreakPositionSize,
   leverageEscalation,
   postLiquidationReentry,
+  largePositionPct,
 ];
 
 /**

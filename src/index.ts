@@ -13,6 +13,8 @@
  *  - One user's failed poll must never crash the loop (per-user try/catch).
  */
 import "dotenv/config";
+import { dirname, join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { Agent, createSigner, createUser, filter } from "@xmtp/agent-sdk";
 import type { Conversation } from "@xmtp/node-sdk";
 import { isAddress } from "viem";
@@ -26,12 +28,28 @@ import {
 } from "./interventions.js";
 import { createBaseClient, getPortfolioSnapshot, pollWallet } from "./watcher.js";
 import { fetchCallbackCloses, fetchTraderOpens, perpScanRange } from "./perps/avantis.js";
+import { computeDisciplineScore, formatScoreCard, scoreLabel } from "./score.js";
+import {
+  loadAllUsers,
+  loadLiquidationKeys,
+  loadPerpCursor,
+  openDb,
+  persistSnapshot,
+  persistTrades,
+  saveBlockCursors,
+  savePerpCursor,
+  saveUser,
+  updateSignalLog,
+} from "./db.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
 const DAILY_CHECKIN_HOUR = Number(process.env.DAILY_CHECKIN_HOUR ?? 20);
 const CHECKIN_INTERVAL_MS = 15 * 60_000;
 const MAX_TRADES_KEPT = 200;
 const MAX_SNAPSHOTS_KEPT = 200;
+
+/** SQLite handle — set once in main() before any loops start. */
+let db: DatabaseSync;
 
 /** Watched users, keyed by XMTP conversation id (one DM == one user). */
 const users = new Map<string, UserState>();
@@ -62,6 +80,7 @@ const HELP = [
   "· set size P — your max single-position size in USD",
   "· rules — show your current plan",
   "· status — today's activity",
+  "· score — your 14-day discipline score",
   "· stop / resume — mute or unmute me",
 ].join("\n");
 
@@ -80,9 +99,11 @@ function statusText(state: UserState): string {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const todays = state.trades.filter((t) => t.timestamp >= startOfDay.getTime());
+  const s = computeDisciplineScore(state);
   return [
     `Watching: ${state.wallet}`,
     `Trades today: ${todays.length} / ${state.rules.maxTradesPerDay}`,
+    `Discipline score: ${s.score}/100 (${scoreLabel(s.score)}, ${s.windowDays}d)`,
     state.paused ? "Status: muted (send resume to re-enable)" : "Status: active",
   ].join("\n");
 }
@@ -151,6 +172,7 @@ async function handleText(ctx: {
       onboardedAt: Date.now(),
     };
     users.set(conversationId, state);
+    saveUser(db, state);
     await ctx.sendTextReply(
       `Watching ${state.wallet}. I'll flag when you break your own plan.\n\n${rulesText(state)}\n\nAdjust anytime: set trades N · set size P`,
     );
@@ -175,6 +197,7 @@ async function handleText(ctx: {
       return;
     }
     state.rules.maxTradesPerDay = n;
+    saveUser(db, state);
     await ctx.sendTextReply(`Done — max ${n} trades/day. That's your line now.`);
     return;
   }
@@ -186,6 +209,7 @@ async function handleText(ctx: {
       return;
     }
     state.rules.maxPositionSizeUsd = p;
+    saveUser(db, state);
     await ctx.sendTextReply(`Done — max $${p} per position. I'll flag anything bigger.`);
     return;
   }
@@ -195,14 +219,22 @@ async function handleText(ctx: {
     return;
   }
 
+  if (lower === "score") {
+    const s = computeDisciplineScore(state);
+    await ctx.sendTextReply(formatScoreCard(state.wallet, s));
+    return;
+  }
+
   if (lower === "stop" || lower === "mute") {
     state.paused = true;
+    saveUser(db, state);
     await ctx.sendTextReply("Muted. I won't message you until you send resume.");
     return;
   }
 
   if (lower === "resume" || lower === "start") {
     state.paused = false;
+    saveUser(db, state);
     await ctx.sendTextReply("Back on. I'll keep you honest.");
     return;
   }
@@ -216,8 +248,15 @@ function startLoops(): void {
   const client = createBaseClient();
 
   // Behavior-triggered: poll wallets and run heuristics.
+  // Overlap guard: a slow RPC can make one cycle outlast the interval; running
+  // two cycles concurrently would double-ingest trades and fire false signals.
+  let polling = false;
   setInterval(() => {
-    void pollAllWallets(client);
+    if (polling) return;
+    polling = true;
+    void pollAllWallets(client).finally(() => {
+      polling = false;
+    });
   }, POLL_INTERVAL_MS);
 
   // The single allowed scheduled message: evening check-in.
@@ -227,7 +266,7 @@ function startLoops(): void {
 }
 
 /** Liquidations we've already debriefed, keyed `${wallet}:${txHash}` (dedup). */
-const liquidationsHandled = new Set<string>();
+let liquidationsHandled = new Set<string>();
 
 /** Shared Avantis scan cursor — perps are fetched once per cycle, not per user. */
 let perpCursor: bigint | undefined;
@@ -276,12 +315,15 @@ async function pollPerps(client: ReturnType<typeof createBaseClient>): Promise<v
       const mine = allCloses.filter((e) => e.wallet === wallet);
       const events = [...opens, ...mine].sort((a, b) => a.timestamp - b.timestamp);
       appendTrades(state, events);
+      persistTrades(db, state.conversationId, events);
       await handleLiquidations(state, events);
     } catch (err) {
       console.error("[watcher] perp fan-out failed:", err instanceof Error ? err.message : err);
     }
   }
+
   perpCursor = range.to;
+  savePerpCursor(db, range.to);
 }
 
 async function pollAllWallets(client: ReturnType<typeof createBaseClient>): Promise<void> {
@@ -300,17 +342,21 @@ async function pollAllWallets(client: ReturnType<typeof createBaseClient>): Prom
 
     // Spot trades (DEX routers).
     try {
-      appendTrades(state, await pollWallet(client, state));
+      const newTrades = await pollWallet(client, state);
+      appendTrades(state, newTrades);
+      persistTrades(db, state.conversationId, newTrades);
     } catch (err) {
       console.error("[watcher] spot poll failed:", err instanceof Error ? err.message : err);
     }
 
     // Portfolio snapshot for drawdown velocity.
     try {
-      state.snapshots.push(await getPortfolioSnapshot(client, state.wallet));
+      const snap = await getPortfolioSnapshot(client, state.wallet);
+      state.snapshots.push(snap);
       if (state.snapshots.length > MAX_SNAPSHOTS_KEPT) {
         state.snapshots.splice(0, state.snapshots.length - MAX_SNAPSHOTS_KEPT);
       }
+      persistSnapshot(db, state.conversationId, snap);
     } catch (err) {
       console.error("[watcher] snapshot failed:", err instanceof Error ? err.message : err);
     }
@@ -318,11 +364,19 @@ async function pollAllWallets(client: ReturnType<typeof createBaseClient>): Prom
     // Heuristics decide WHEN; the LLM only words it.
     try {
       for (const signal of runHeuristics(state, now)) {
+        updateSignalLog(db, state.conversationId, signal.type, signal.detectedAt);
         const message = await generateIntervention(signal, state.rules);
         await sendTo(state.conversationId, message);
       }
     } catch (err) {
       console.error("[watcher] heuristics failed:", err instanceof Error ? err.message : err);
+    }
+
+    // Persist updated block cursor after all per-user work for this cycle.
+    try {
+      saveBlockCursors(db, state);
+    } catch (err) {
+      console.error("[watcher] cursor save failed:", err instanceof Error ? err.message : err);
     }
   }
 }
@@ -334,9 +388,11 @@ async function runDailyCheckIns(): Promise<void> {
     if (state.paused) continue;
     if (isSameLocalDay(state.lastDailyCheckInAt, now.getTime())) continue;
     try {
-      const message = await generateDailyCheckIn(state);
+      const score = computeDisciplineScore(state, now.getTime());
+      const message = await generateDailyCheckIn(state, score);
       await sendTo(state.conversationId, message);
       state.lastDailyCheckInAt = now.getTime();
+      saveUser(db, state);
     } catch (err) {
       console.error("[checkin] failed:", err instanceof Error ? err.message : err);
     }
@@ -344,6 +400,33 @@ async function runDailyCheckIns(): Promise<void> {
 }
 
 // --- boot ---
+
+/**
+ * Rebuild the conversation handles for restored users so proactive sends work
+ * immediately after a restart. Without this, every restored user is silently
+ * unreachable until they happen to message us first.
+ */
+async function rehydrateConversations(agent: Agent): Promise<void> {
+  if (users.size === 0) return;
+  try {
+    await agent.client.conversations.sync();
+  } catch (err) {
+    console.error("[boot] conversations sync failed:", err instanceof Error ? err.message : err);
+  }
+  let restored = 0;
+  for (const state of users.values()) {
+    try {
+      const convo = await agent.client.conversations.getConversationById(state.conversationId);
+      if (convo) {
+        conversations.set(state.conversationId, convo as unknown as Conversation);
+        restored++;
+      }
+    } catch (err) {
+      console.error("[boot] conversation restore failed:", err instanceof Error ? err.message : err);
+    }
+  }
+  console.log(`Rehydrated ${restored}/${users.size} conversation handle(s).`);
+}
 
 async function main(): Promise<void> {
   const walletKey = process.env.WALLET_KEY;
@@ -353,11 +436,26 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Open SQLite and restore state from previous run.
+  const dbPath = process.env.DB_PATH ?? "./data/agent.db";
+  db = openDb(dbPath);
+  for (const state of loadAllUsers(db)) {
+    users.set(state.conversationId, state);
+  }
+  liquidationsHandled = loadLiquidationKeys(db);
+  perpCursor = loadPerpCursor(db);
+  console.log(`Restored ${users.size} user(s) from DB.`);
+
+  const xmtpEnv = (process.env.XMTP_ENV ?? "dev") as "local" | "dev" | "production";
   const user = createUser(walletKey as `0x${string}`);
   const signer = createSigner(user);
   const agent = await Agent.create(signer, {
     dbEncryptionKey: encryptionKey as `0x${string}`,
-    env: (process.env.XMTP_ENV ?? "dev") as "local" | "dev" | "production",
+    env: xmtpEnv,
+    // Keep the XMTP identity DB next to the agent DB (one persistent volume).
+    // Losing it creates a new XMTP "installation" every restart, and an inbox
+    // is hard-capped at ~10 installations — after that the agent is bricked.
+    dbPath: (inboxId) => join(dirname(dbPath), `xmtp-${xmtpEnv}-${inboxId}.db3`),
   });
 
   agent.on("text", (ctx) => {
@@ -371,10 +469,28 @@ async function main(): Promise<void> {
   });
 
   agent.on("start", () => {
-    console.log(`Discipline agent live on XMTP (${process.env.XMTP_ENV ?? "dev"}).`);
+    console.log(`Discipline agent live on XMTP (${xmtpEnv}).`);
     console.log(`Agent address: ${agent.address ?? "unknown"}`);
-    startLoops();
+    void rehydrateConversations(agent).finally(() => startLoops());
   });
+
+  // Graceful shutdown: stop XMTP streams, close SQLite cleanly. The 5s timer
+  // hard-exits if either hangs (e.g. network stall during agent.stop()).
+  const shutdown = (signal: string) => {
+    console.log(`[${signal}] shutting down…`);
+    setTimeout(() => process.exit(1), 5000).unref();
+    void (async () => {
+      try {
+        await agent.stop();
+      } catch {}
+      try {
+        db.close();
+      } catch {}
+      process.exit(0);
+    })();
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   await agent.start();
 }

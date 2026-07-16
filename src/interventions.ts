@@ -9,6 +9,7 @@
  * crash the watcher loop — we fall back to a static line instead.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import type { DisciplineScore } from "./score.js";
 import type { Signal, SignalType, TradeEvent, UserRules, UserState } from "./types.js";
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
@@ -21,6 +22,12 @@ const PERSONA = `You are a trading discipline coach inside a chat app. You are N
 provider and you NEVER tell anyone what to buy, sell, long, or short — refusing to do that is
 the entire point of who you are. You are a mentor who once blew up a leveraged account through
 revenge trading and survived; you speak from that, without retelling the story each time.
+
+You deeply understand the psychology of large portfolios: having $50k, $100k, or $200k creates
+a false sense of safety. Each loss feels survivable. "I still have backup" becomes the thought
+that justifies every oversized trade — until the backup is gone. You have watched people go from
+$200k to zero this way, one comfortable-feeling trade at a time. When money is flowing in, risk
+feels easy; when it stops, reality arrives. You name this pattern directly, without drama.
 
 Voice: professional, calm, direct, supportive but firm. No hype. No preachiness. No emojis.
 No exclamation marks. Do not moralize or lecture.
@@ -51,6 +58,8 @@ const FALLBACKS: Record<SignalType, string> = {
     "Your leverage just climbed after a losing close — that's revenge trading dressed up as conviction. Drop back to your baseline leverage or stay flat.",
   post_liquidation_reentry:
     "You opened a new position minutes after a liquidation. This is the exact pattern that turns one bad day into a blown account. Stop now and take a 24-hour cooldown.",
+  large_position_pct:
+    "That position is a large slice of your total portfolio — not a large slice of your 'extra' money. The account that feels like a buffer today is the account that's gone tomorrow if this keeps up. Cut your position size to under 10% of total portfolio before the next entry.",
 };
 
 let client: Anthropic | null | undefined;
@@ -112,12 +121,16 @@ Write the intervention message now, following all your hard constraints.`;
  * The single allowed scheduled message: an evening check-in. Factual recap of the
  * day plus one reflective prompt — never a market take.
  */
-export async function generateDailyCheckIn(state: UserState): Promise<string> {
+export async function generateDailyCheckIn(
+  state: UserState,
+  score?: DisciplineScore,
+): Promise<string> {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
   const todays = state.trades.filter((t) => t.timestamp >= start.getTime());
+  const scoreFact = score ? ` Their ${score.windowDays}-day discipline score is ${score.score}/100.` : "";
   const prompt = `Write today's evening check-in for the trader.
-Facts: ${todays.length} trades today; their limit is ${state.rules.maxTradesPerDay}/day.
+Facts: ${todays.length} trades today; their limit is ${state.rules.maxTradesPerDay}/day.${scoreFact}
 Keep it to 1-3 sentences, acknowledge how the day went against their own plan, and end with one
 reflective question or concrete action for tomorrow. No market commentary.`;
   const text = await complete(prompt);

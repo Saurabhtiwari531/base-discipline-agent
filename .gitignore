@@ -7,6 +7,9 @@ node_modules/
 *.db3-*
 xmtp-*.db3*
 .data/
+# Agent SQLite state (users/trades/scores)
+data/
 dist/
 *.log
 .DS_Store
+logs/

@@ -1,0 +1,16 @@
+node_modules
+.env
+.env.*
+data
+.data
+*.db3
+*.db3-*
+xmtp-*.db3*
+dist
+test
+*.log
+.git
+.gitignore
+.DS_Store
+CLAUDE.md
+README.md

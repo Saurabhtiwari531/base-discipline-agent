@@ -8,21 +8,23 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "gen:keys": "tsx src/genKeys.ts",
+    "report": "tsx scripts/validation-report.ts",
+    "postinstall": "bash scripts/fix-xmtp-darwin.sh || true",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
     "@xmtp/agent-sdk": "^2.3.0",
     "dotenv": "^17.4.2",
+    "tsx": "^4.22.4",
     "viem": "^2.52.2"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
-    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
 }
