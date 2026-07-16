@@ -16,6 +16,21 @@ import { Agent, createSigner, createUser } from "@xmtp/agent-sdk";
 const AGENT_ADDRESS = process.env.AGENT_ADDRESS;
 const REPLY_TIMEOUT_MS = 30_000;
 
+/**
+ * When DEMO_TIMELINE is set, every visual event is logged (ms since script
+ * start) so scripts/render-sfx.ts can place sounds frame-perfectly on the
+ * recording made from this same run.
+ */
+const TIMELINE_PATH = process.env.DEMO_TIMELINE;
+const t0 = Date.now();
+type TimelineMsg = { typeStart: number; chars: number; sentAt: number; replyAt: number; replyLines: number };
+const timeline: { bannerAt: number; msgs: TimelineMsg[]; outroAt: number } = {
+  bannerAt: 0,
+  msgs: [],
+  outroAt: 0,
+};
+const now = () => Date.now() - t0;
+
 // ANSI
 const CYAN = "\x1b[1;36m";
 const GREEN = "\x1b[1;32m";
@@ -74,8 +89,10 @@ async function main(): Promise<void> {
 
   async function say(text: string): Promise<void> {
     process.stdout.write(`\n  ${CYAN}You${RESET}    `);
+    const typeStart = now();
     await typeOut(text);
     process.stdout.write("\n");
+    const sentAt = now();
     await dm.sendText(text);
 
     process.stdout.write(`  ${GREEN}Agent${RESET}  ${DIM}typing…${RESET}`);
@@ -90,6 +107,7 @@ async function main(): Promise<void> {
         const reply = textOf(m.content);
         if (reply === undefined) continue;
         const lines = reply.split("\n");
+        timeline.msgs.push({ typeStart, chars: text.length, sentAt, replyAt: now(), replyLines: lines.length });
         process.stdout.write(CLEAR_LINE);
         process.stdout.write(`  ${GREEN}Agent${RESET}  ${lines[0] ?? ""}\n`);
         for (const line of lines.slice(1)) {
@@ -104,6 +122,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  timeline.bannerAt = now();
   console.log(`\n  ${BOLD}● Base Discipline Agent${RESET}`);
   console.log(`  ${DIM}An AI coach that watches your wallet on Base and calls you`);
   console.log(`  out when you break your own trading plan. Live on XMTP ↓${RESET}`);
@@ -117,9 +136,14 @@ async function main(): Promise<void> {
   await say("should i buy eth?");
 
   await sleep(600);
+  timeline.outroAt = now();
   console.log(`\n  ${BOLD}✓ It enforces YOUR plan. It never gives signals.${RESET}`);
   console.log(`  ${DIM}DM the agent on Base App → ${AGENT_ADDRESS}${RESET}\n`);
 
+  if (TIMELINE_PATH) {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(TIMELINE_PATH, JSON.stringify(timeline, null, 2));
+  }
   rmSync(tmp, { recursive: true, force: true });
   process.exit(0);
 }
