@@ -7,7 +7,7 @@
  *      XMTP_ENV=dev DB_PATH=/tmp/demo-agent.db npx tsx src/index.ts
  *   2) AGENT_ADDRESS=0x… npx tsx scripts/demo-chat.ts
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -23,13 +23,20 @@ const REPLY_TIMEOUT_MS = 30_000;
  */
 const TIMELINE_PATH = process.env.DEMO_TIMELINE;
 const t0 = Date.now();
-type TimelineMsg = { typeStart: number; chars: number; sentAt: number; replyAt: number; replyLines: number };
+type TimelineMsg = { typeStart: number; text: string; chars: number; sentAt: number; replyAt: number; replyLines: number };
 const timeline: { bannerAt: number; msgs: TimelineMsg[]; outroAt: number } = {
   bannerAt: 0,
   msgs: [],
   outroAt: 0,
 };
 const now = () => Date.now() - t0;
+
+function saveTimeline(): void {
+  if (!TIMELINE_PATH) return;
+  try {
+    writeFileSync(TIMELINE_PATH, JSON.stringify(timeline, null, 2));
+  } catch {}
+}
 
 // ANSI
 const CYAN = "\x1b[1;36m";
@@ -107,7 +114,8 @@ async function main(): Promise<void> {
         const reply = textOf(m.content);
         if (reply === undefined) continue;
         const lines = reply.split("\n");
-        timeline.msgs.push({ typeStart, chars: text.length, sentAt, replyAt: now(), replyLines: lines.length });
+        timeline.msgs.push({ typeStart, text, chars: text.length, sentAt, replyAt: now(), replyLines: lines.length });
+        saveTimeline();
         process.stdout.write(CLEAR_LINE);
         process.stdout.write(`  ${GREEN}Agent${RESET}  ${lines[0] ?? ""}\n`);
         for (const line of lines.slice(1)) {
@@ -140,10 +148,7 @@ async function main(): Promise<void> {
   console.log(`\n  ${BOLD}✓ It enforces YOUR plan. It never gives signals.${RESET}`);
   console.log(`  ${DIM}DM the agent on Base App → ${AGENT_ADDRESS}${RESET}\n`);
 
-  if (TIMELINE_PATH) {
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(TIMELINE_PATH, JSON.stringify(timeline, null, 2));
-  }
+  saveTimeline();
   rmSync(tmp, { recursive: true, force: true });
   process.exit(0);
 }
