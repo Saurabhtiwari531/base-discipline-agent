@@ -249,7 +249,12 @@ async function handleText(ctx: {
 
 // --- background loops ---
 
+/** The XMTP SDK re-emits "start" after every stream reconnect — loops must start once. */
+let loopsStarted = false;
+
 function startLoops(): void {
+  if (loopsStarted) return;
+  loopsStarted = true;
   const client = createBaseClient();
 
   // Behavior-triggered: poll wallets and run heuristics.
