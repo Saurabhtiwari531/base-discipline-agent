@@ -141,6 +141,11 @@ async function handleText(ctx: {
   // Ignore our own messages.
   if (filter.fromSelf(ctx.message as never, ctx.client)) return;
 
+  // DMs only for now. Base App etiquette: in group chats an agent must reply
+  // only when @mentioned — that lands with Squad mode (roadmap #6). Until
+  // then, silently ignore group messages so we never spam a group.
+  if (!filter.isDM(ctx.conversation as never)) return;
+
   const text = (ctx.message.content ?? "").trim();
   if (!text) return;
   const lower = text.toLowerCase();
