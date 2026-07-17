@@ -4,6 +4,20 @@ An AI trading-discipline agent for Base App. It watches a trader's on-chain wall
 (spot DEXes + Avantis perps) and messages them on XMTP when they break **their own**
 trading plan. It never gives buy/sell calls — refusing to is the brand.
 
+**Live on Base App now** — DM the agent: `0xba49cf88c69b05c6f89dabeb787f505e192c0180`
+
+![Demo — a real conversation with the live agent](demo/discipline-agent-demo.gif)
+
+## Why this exists
+
+In 2021 I turned $100 into $470, then revenge-traded 6x UNI longs until
+liquidation. The pattern that killed the account — loss, bigger position,
+loss, even bigger position — is detectable on-chain. This agent encodes those
+failure patterns (tilt, loss-chasing, FOMO, post-liquidation revenge, the
+"I have backup" false-safety of large accounts) as detection rules and holds
+traders to the plan **they** wrote. No signals, no alpha. An agent that gives
+you signals is just another thing to blame.
+
 ## How it works
 
 ```
@@ -78,5 +92,17 @@ and which signals actually fired.
 ## Tests
 
 ```bash
-npm run typecheck && npm test   # 21 tests: heuristics + score model
+npm run typecheck && npm test   # 31 tests: heuristics, score model, SQLite round-trip
 ```
+
+## Status & roadmap
+
+- ✅ Live on XMTP production (Base App), validating with first test users
+- ✅ 10 behavior heuristics · Discipline Score (0-100) · liquidation post-mortems
+- 🔜 Hard Mode: an onchain commitment contract — lock your own rules, breaking
+  them requires a 24h timelock
+- 🔜 Squad mode: shared adherence in group chats
+
+## License
+
+MIT — see [LICENSE](LICENSE). Built by [Saurabh Tiwari](https://github.com/Saurabhtiwari531).
