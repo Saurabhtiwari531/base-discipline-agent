@@ -388,6 +388,20 @@ async function catchUpMissedMessages(agent: Agent): Promise<void> {
   }
 }
 
+/**
+ * Self-watchdog: if the catch-up cycle (our end-to-end health signal — it needs
+ * XMTP network + local db) hasn't succeeded for 5 minutes, exit non-zero and
+ * let launchd restart us fresh. A wedged process must never look "alive".
+ */
+let lastHealthyAt = Date.now();
+const WATCHDOG_LIMIT_MS = 5 * 60_000;
+setInterval(() => {
+  if (Date.now() - lastHealthyAt > WATCHDOG_LIMIT_MS) {
+    console.error("[watchdog] unhealthy for 5m — exiting for supervisor restart");
+    process.exit(1);
+  }
+}, 60_000).unref();
+
 /** The XMTP SDK re-emits "start" after every stream reconnect — loops must start once. */
 let loopsStarted = false;
 
@@ -403,6 +417,9 @@ function startLoops(agent: Agent): void {
     if (catchingUp) return;
     catchingUp = true;
     catchUpMissedMessages(agent)
+      .then(() => {
+        lastHealthyAt = Date.now();
+      })
       .catch((err) =>
         console.error("[catchup] cycle failed:", err instanceof Error ? err.message : err),
       )
