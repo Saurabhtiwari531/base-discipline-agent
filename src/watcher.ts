@@ -98,18 +98,56 @@ export async function fetchEthUsd(): Promise<number> {
   return ethPriceCache.usd;
 }
 
-/** Read the wallet's native ETH balance and snapshot its USD value. */
+const ERC20_ABI = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** balanceOf that returns 0 instead of throwing — one token must never kill a snapshot. */
+async function safeBalanceOf(client: BaseClient, token: string, wallet: string): Promise<bigint> {
+  try {
+    return await client.readContract({
+      address: token as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [wallet as `0x${string}`],
+    });
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * Snapshot the wallet's portfolio value: native ETH + WETH + major stables.
+ * Powers drawdown_velocity, large_position_pct and auto position sizing.
+ */
 export async function getPortfolioSnapshot(
   client: BaseClient,
   wallet: string,
 ): Promise<PortfolioSnapshot> {
-  const balanceWei = await client.getBalance({ address: wallet as `0x${string}` });
+  const addr = wallet as `0x${string}`;
+  const [balanceWei, wethRaw, usdcRaw, usdtRaw, daiRaw, ethUsd] = await Promise.all([
+    client.getBalance({ address: addr }),
+    safeBalanceOf(client, WETH, wallet),
+    safeBalanceOf(client, USDC, wallet),
+    safeBalanceOf(client, USDT, wallet),
+    safeBalanceOf(client, DAI, wallet),
+    fetchEthUsd(),
+  ]);
+
   const ethBalance = Number(formatEther(balanceWei));
-  const ethUsd = await fetchEthUsd();
+  const wethBalance = Number(wethRaw) / 1e18;
+  const stableUsd = Number(usdcRaw) / 1e6 + Number(usdtRaw) / 1e6 + Number(daiRaw) / 1e18;
+
   return {
     timestamp: Date.now(),
     ethBalance,
-    usdValue: ethBalance * ethUsd,
+    usdValue: (ethBalance + wethBalance) * ethUsd + stableUsd,
   };
 }
 

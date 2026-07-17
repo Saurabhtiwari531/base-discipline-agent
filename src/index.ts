@@ -43,6 +43,9 @@ import {
 } from "./db.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
+
+/** Shared Base RPC client for command-time reads (auto-sizing, etc.). */
+const chainClient = createBaseClient();
 const DAILY_CHECKIN_HOUR = Number(process.env.DAILY_CHECKIN_HOUR ?? 20);
 const CHECKIN_INTERVAL_MS = 15 * 60_000;
 const MAX_TRADES_KEPT = 200;
@@ -84,25 +87,38 @@ const ADDRESS_ANYWHERE = /0x[a-fA-F0-9]{40}/;
 const GREETING = /^(hi|hii+|hello|hey|yo|gm|gn|namaste|sup|hola)\b[\s!.]*$/i;
 
 const HELP = [
-  "Commands:",
-  "· watch 0x… — set the wallet I monitor",
-  "· set trades N — your max trades per day",
-  "· set size P — your max single-position size in USD",
-  "· rules — show your current plan",
-  "· status — today's activity",
-  "· score — your 14-day discipline score",
-  "· stop / resume — mute or unmute me",
+  "⌘ Commands",
+  "━━━━━━━━━━━━━━",
+  "watch 0x…  →  wallet I monitor",
+  "set trades N  →  your daily trade limit",
+  "set size P  →  max position (USD)",
+  "set size auto  →  I size it from your portfolio",
+  "rules  →  your plan",
+  "status  →  today at a glance",
+  "score  →  14-day discipline score",
+  "stop / resume  →  mute · unmute",
 ].join("\n");
+
+function shortAddr(a: string): string {
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
 
 function rulesText(state: UserState): string {
   const r = state.rules;
   const size = r.maxPositionSizeUsd > 0 ? `$${r.maxPositionSizeUsd}` : "not set";
   return [
-    "Your plan:",
-    `· max ${r.maxTradesPerDay} trades/day`,
-    `· max position size: ${size}`,
-    `· no-trade hours: ${r.noTradeStartHour}:00–${r.noTradeEndHour}:00`,
+    "📋 Your plan",
+    "━━━━━━━━━━━━━━",
+    `Trades/day  ·  max ${r.maxTradesPerDay}`,
+    `Position    ·  max ${size}`,
+    `No-trade    ·  ${r.noTradeStartHour}:00 → ${r.noTradeEndHour}:00`,
   ].join("\n");
+}
+
+/** ▰▰▰▰▰▰▰▱▱▱ style meter for 0-100 values. */
+function meter(value: number, max: number): string {
+  const filled = Math.round((Math.max(0, Math.min(value, max)) / max) * 10);
+  return "▰".repeat(filled) + "▱".repeat(10 - filled);
 }
 
 function statusText(state: UserState): string {
@@ -110,11 +126,15 @@ function statusText(state: UserState): string {
   startOfDay.setHours(0, 0, 0, 0);
   const todays = state.trades.filter((t) => t.timestamp >= startOfDay.getTime());
   const s = computeDisciplineScore(state);
+  const used = todays.length;
+  const cap = state.rules.maxTradesPerDay;
   return [
-    `Watching: ${state.wallet}`,
-    `Trades today: ${todays.length} / ${state.rules.maxTradesPerDay}`,
-    `Discipline score: ${s.score}/100 (${scoreLabel(s.score)}, ${s.windowDays}d)`,
-    state.paused ? "Status: muted (send resume to re-enable)" : "Status: active",
+    "📊 Today",
+    "━━━━━━━━━━━━━━",
+    `Wallet  ·  ${shortAddr(state.wallet)}`,
+    `Trades  ·  ${meter(used, cap)}  ${used}/${cap}`,
+    `Score   ·  ${s.score}/100 — ${scoreLabel(s.score)}`,
+    state.paused ? "State   ·  🔇 muted (send resume)" : "State   ·  🟢 watching",
   ].join("\n");
 }
 
@@ -291,8 +311,34 @@ async function handleCommand(
     // Still onboarding (no size set yet) -> guide to the final step.
     await reply(
       state.rules.maxPositionSizeUsd <= 0
-        ? `Step 2 done ✓ Max ${n} trades/day.\n\nLast step — your max size per position, in USD. Reply like:\nset size 500`
+        ? `Step 2 done ✓ Max ${n} trades/day.\n\nLast step — your max size per position. Reply like:\nset size 500\n\nOr just say auto — I'll read your portfolio and set it to 10%.`
         : `Done — max ${n} trades/day. That's your line now.`,
+    );
+    return;
+  }
+
+  // Auto position sizing: read the portfolio, cap a single position at 10%.
+  if (lower === "auto" || lower === "set size auto") {
+    const firstTime = state.rules.maxPositionSizeUsd <= 0;
+    let snapUsd = 0;
+    try {
+      snapUsd = (await getPortfolioSnapshot(chainClient, state.wallet)).usdValue;
+    } catch {
+      await reply("Couldn't read your portfolio right now — try again in a minute, or set it manually: set size 500");
+      return;
+    }
+    if (snapUsd < 20) {
+      await reply(
+        `I can see only ~$${Math.round(snapUsd)} in ${shortAddr(state.wallet)} (ETH + WETH + stables). Too small to auto-size — set it manually, e.g.: set size 100`,
+      );
+      return;
+    }
+    const size = Math.max(10, Math.round((snapUsd * 0.1) / 5) * 5);
+    state.rules.maxPositionSizeUsd = size;
+    saveUser(db, state);
+    const head = firstTime ? "Step 3 done ✓ Auto-sized." : "Auto-sized ✓";
+    await reply(
+      `${head}\n\nPortfolio  ·  ~$${Math.round(snapUsd)}\nMax size   ·  $${size} (10%)\n\nOne bad trade stays survivable — that's the point. Change anytime: set size 300${firstTime ? "\n\nThat's your plan — I'm watching now. Try: score" : ""}`,
     );
     return;
   }
