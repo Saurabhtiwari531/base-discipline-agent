@@ -69,9 +69,19 @@ function isSignalRequest(text: string): boolean {
 const ONBOARDING = [
   "I'm your trading discipline coach — I watch your wallet and call out when you break your own plan. I do not give buy/sell calls. Ever.",
   "",
-  "To start, send: watch 0xYourWalletAddress",
-  "Then set your rules: set trades 5  ·  set size 500",
+  "Step 1 of 3 — paste the address of the wallet you trade with. Just the address is fine, like:",
+  "0x1234...abcd",
 ].join("\n");
+
+/** Short nudge when someone keeps chatting without giving an address. */
+const ONBOARDING_NUDGE =
+  "I just need your wallet address to start — paste it here (it starts with 0x).";
+
+/** Matches an EVM address anywhere inside a message. */
+const ADDRESS_ANYWHERE = /0x[a-fA-F0-9]{40}/;
+
+/** "hi", "hello", "gm", "hey" style openers. */
+const GREETING = /^(hi|hii+|hello|hey|yo|gm|gn|namaste|sup|hola)\b[\s!.]*$/i;
 
 const HELP = [
   "Commands:",
@@ -202,22 +212,32 @@ async function handleCommand(
   const conversationId = conversation.id;
   conversations.set(conversationId, conversation);
 
+  const existing = users.get(conversationId);
+
   // Brand rule: refuse signal requests before anything else.
   if (isSignalRequest(lower)) {
     await reply(await generateRefusal(text));
     return;
   }
 
-  // Onboarding: "watch 0x…"
-  if (lower.startsWith("watch")) {
-    const addr = text.split(/\s+/)[1];
+  // Onboarding: "watch 0x…" — but real users often just paste the address, or
+  // write around it ("this is my wallet 0x…"). Accept an address ANYWHERE in
+  // the message during onboarding, and a bare address later as a wallet switch.
+  const addressInText = text.match(ADDRESS_ANYWHERE)?.[0];
+  const bareAddressOnly =
+    addressInText !== undefined && text.replace(ADDRESS_ANYWHERE, "").trim() === "";
+  if (lower.startsWith("watch") || (addressInText && (!existing || bareAddressOnly))) {
+    const addr = addressInText;
     if (!addr || !isAddress(addr)) {
-      await reply("That doesn't look like a valid 0x address. Try: watch 0x…");
+      await reply(
+        "That doesn't look like a valid wallet address — it should be 42 characters starting with 0x. Paste it again?",
+      );
       return;
     }
     const state: UserState = {
       wallet: addr.toLowerCase(),
-      inboxId: senderInboxId,      conversationId,
+      inboxId: senderInboxId,
+      conversationId,
       rules: { ...DEFAULT_RULES },
       trades: [],
       snapshots: [],
@@ -227,15 +247,29 @@ async function handleCommand(
     };
     users.set(conversationId, state);
     saveUser(db, state);
+    const short = `${addr.slice(0, 6)}…${addr.slice(-4)}`;
     await reply(
-      `Watching ${state.wallet}. I'll flag when you break your own plan.\n\n${rulesText(state)}\n\nAdjust anytime: set trades N · set size P`,
+      existing
+        ? `Switched — now watching ${short}.\n\n${rulesText(state)}`
+        : `Step 1 done ✓ Watching ${short}.\n\nStep 2 of 3 — how many trades per day is YOUR limit? Reply like:\nset trades 5`,
     );
     return;
   }
 
-  const state = users.get(conversationId);
+  const state = existing;
   if (!state) {
-    await reply(ONBOARDING);
+    // No wallet yet: first contact gets the full intro, everything after gets
+    // a short nudge — repeating the same wall of text reads like a broken bot.
+    await reply(GREETING.test(text) ? ONBOARDING : ONBOARDING_NUDGE);
+    return;
+  }
+
+  // Greeting from an onboarded user — reassure, don't dump the help menu.
+  if (GREETING.test(text)) {
+    const short = `${state.wallet.slice(0, 6)}…${state.wallet.slice(-4)}`;
+    await reply(
+      `All good — I'm watching ${short}. Send status, score or rules anytime. I'll only message you when your plan breaks.`,
+    );
     return;
   }
 
@@ -252,7 +286,12 @@ async function handleCommand(
     }
     state.rules.maxTradesPerDay = n;
     saveUser(db, state);
-    await reply(`Done — max ${n} trades/day. That's your line now.`);
+    // Still onboarding (no size set yet) -> guide to the final step.
+    await reply(
+      state.rules.maxPositionSizeUsd <= 0
+        ? `Step 2 done ✓ Max ${n} trades/day.\n\nLast step — your max size per position, in USD. Reply like:\nset size 500`
+        : `Done — max ${n} trades/day. That's your line now.`,
+    );
     return;
   }
 
@@ -262,9 +301,14 @@ async function handleCommand(
       await reply("Give me a positive USD amount, e.g. set size 500");
       return;
     }
+    const firstTime = state.rules.maxPositionSizeUsd <= 0;
     state.rules.maxPositionSizeUsd = p;
     saveUser(db, state);
-    await reply(`Done — max $${p} per position. I'll flag anything bigger.`);
+    await reply(
+      firstTime
+        ? `Step 3 done ✓ Max $${p} per position.\n\nThat's your plan — I'm watching now. You'll only hear from me when you break it (plus one evening check-in). Try: score`
+        : `Done — max $${p} per position. I'll flag anything bigger.`,
+    );
     return;
   }
 
@@ -293,7 +337,7 @@ async function handleCommand(
     return;
   }
 
-  await reply(HELP);
+  await reply(`Didn't catch that — here's what I understand:\n\n${HELP}`);
 }
 
 // --- background loops ---
