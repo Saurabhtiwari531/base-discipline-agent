@@ -132,14 +132,47 @@ async function sendTo(conversationId: string, text: string): Promise<void> {
 
 // --- message handling ---
 
+/**
+ * XMTP re-syncs on every stream reconnect and re-emits recent messages, so the
+ * same message can reach the handler many times (observed: 1 user "hello" ->
+ * ~15 duplicate replies during a flaky-network stretch). Dedup by message id,
+ * and never answer stale backlog after downtime.
+ */
+const processedMessages = new Set<string>();
+const MAX_PROCESSED_KEPT = 2000;
+const MAX_MESSAGE_AGE_MS = 10 * 60_000;
+
+function messageSentAtMs(m: { sentAt?: unknown; sentAtNs?: unknown }): number {
+  if (m.sentAt instanceof Date) return m.sentAt.getTime();
+  if (typeof m.sentAtNs === "bigint") return Number(m.sentAtNs / 1_000_000n);
+  return Date.now(); // unknown shape — treat as fresh rather than drop
+}
+
 async function handleText(ctx: {
-  message: { content: string; senderInboxId: string };
+  message: { id?: string; content: string; senderInboxId: string; sentAt?: unknown; sentAtNs?: unknown };
   conversation: Conversation;
   client: Parameters<typeof filter.fromSelf>[1];
   sendTextReply: (text: string) => Promise<void>;
 }): Promise<void> {
   // Ignore our own messages.
   if (filter.fromSelf(ctx.message as never, ctx.client)) return;
+
+  // Exactly-once: skip anything we've already handled this process lifetime.
+  const msgId = ctx.message.id;
+  if (msgId) {
+    if (processedMessages.has(msgId)) return;
+    processedMessages.add(msgId);
+    if (processedMessages.size > MAX_PROCESSED_KEPT) {
+      let dropped = 0;
+      for (const id of processedMessages) {
+        processedMessages.delete(id);
+        if (++dropped >= MAX_PROCESSED_KEPT / 2) break;
+      }
+    }
+  }
+
+  // Don't answer stale backlog (e.g. messages that arrived while we were down).
+  if (Date.now() - messageSentAtMs(ctx.message) > MAX_MESSAGE_AGE_MS) return;
 
   // DMs only for now. Base App etiquette: in group chats an agent must reply
   // only when @mentioned — that lands with Squad mode (roadmap #6). Until
