@@ -16,7 +16,7 @@ import "dotenv/config";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { Agent, createSigner, createUser, filter } from "@xmtp/agent-sdk";
-import type { Conversation } from "@xmtp/node-sdk";
+import { SortDirection, type Conversation } from "@xmtp/node-sdk";
 import { isAddress } from "viem";
 import { DEFAULT_RULES, type TradeEvent, type UserState } from "./types.js";
 import { runHeuristics } from "./heuristics.js";
@@ -193,7 +193,9 @@ async function handleText(ctx: {
     (ctx.message.content ?? "").trim(),
     ctx.message.senderInboxId,
     ctx.conversation,
-    ctx.sendTextReply,
+    // Arrow wrapper: sendTextReply is a class method — passing it bare would
+    // strip its `this` and crash inside the SDK.
+    (t) => ctx.sendTextReply(t),
   );
 }
 
@@ -356,7 +358,12 @@ async function catchUpMissedMessages(agent: Agent): Promise<void> {
   for (const convo of convos) {
     if (!filter.isDM(convo as never)) continue;
     try {
-      const recent = await (convo as Conversation).messages({ limit: 10n } as never);
+      // limit must be a JS number (the native binding rejects BigInt here);
+      // descending = newest first, so recent messages are always in the page.
+      const recent = await (convo as Conversation).messages({
+        limit: 20,
+        direction: SortDirection.Descending,
+      } as never);
       const pending = recent
         .filter((m) => {
           if (!m.id || processedMessages.has(m.id)) return false;
@@ -617,7 +624,7 @@ async function main(): Promise<void> {
 
   agent.on("text", (ctx) => {
     void handleText(ctx as never).catch((err) =>
-      console.error("[handler] error:", err instanceof Error ? err.message : err),
+      console.error("[handler] error:", err instanceof Error ? (err.stack ?? err.message) : err),
     );
   });
 
