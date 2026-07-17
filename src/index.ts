@@ -179,15 +179,32 @@ async function handleText(ctx: {
   // then, silently ignore group messages so we never spam a group.
   if (!filter.isDM(ctx.conversation as never)) return;
 
-  const text = (ctx.message.content ?? "").trim();
+  await handleCommand(
+    (ctx.message.content ?? "").trim(),
+    ctx.message.senderInboxId,
+    ctx.conversation,
+    ctx.sendTextReply,
+  );
+}
+
+/**
+ * The command brain, shared by both delivery paths: the live stream (replies
+ * via quoted sendTextReply) and the catch-up sync loop (plain sendText).
+ */
+async function handleCommand(
+  text: string,
+  senderInboxId: string,
+  conversation: Conversation,
+  reply: (text: string) => Promise<void>,
+): Promise<void> {
   if (!text) return;
   const lower = text.toLowerCase();
-  const conversationId = ctx.conversation.id;
-  conversations.set(conversationId, ctx.conversation);
+  const conversationId = conversation.id;
+  conversations.set(conversationId, conversation);
 
   // Brand rule: refuse signal requests before anything else.
   if (isSignalRequest(lower)) {
-    await ctx.sendTextReply(await generateRefusal(text));
+    await reply(await generateRefusal(text));
     return;
   }
 
@@ -195,13 +212,12 @@ async function handleText(ctx: {
   if (lower.startsWith("watch")) {
     const addr = text.split(/\s+/)[1];
     if (!addr || !isAddress(addr)) {
-      await ctx.sendTextReply("That doesn't look like a valid 0x address. Try: watch 0x…");
+      await reply("That doesn't look like a valid 0x address. Try: watch 0x…");
       return;
     }
     const state: UserState = {
       wallet: addr.toLowerCase(),
-      inboxId: ctx.message.senderInboxId,
-      conversationId,
+      inboxId: senderInboxId,      conversationId,
       rules: { ...DEFAULT_RULES },
       trades: [],
       snapshots: [],
@@ -211,7 +227,7 @@ async function handleText(ctx: {
     };
     users.set(conversationId, state);
     saveUser(db, state);
-    await ctx.sendTextReply(
+    await reply(
       `Watching ${state.wallet}. I'll flag when you break your own plan.\n\n${rulesText(state)}\n\nAdjust anytime: set trades N · set size P`,
     );
     return;
@@ -219,76 +235,130 @@ async function handleText(ctx: {
 
   const state = users.get(conversationId);
   if (!state) {
-    await ctx.sendTextReply(ONBOARDING);
+    await reply(ONBOARDING);
     return;
   }
 
   if (lower === "rules") {
-    await ctx.sendTextReply(rulesText(state));
+    await reply(rulesText(state));
     return;
   }
 
   if (lower.startsWith("set trades")) {
     const n = parseInt(lower.replace("set trades", "").trim(), 10);
     if (!Number.isFinite(n) || n <= 0) {
-      await ctx.sendTextReply("Give me a positive number, e.g. set trades 5");
+      await reply("Give me a positive number, e.g. set trades 5");
       return;
     }
     state.rules.maxTradesPerDay = n;
     saveUser(db, state);
-    await ctx.sendTextReply(`Done — max ${n} trades/day. That's your line now.`);
+    await reply(`Done — max ${n} trades/day. That's your line now.`);
     return;
   }
 
   if (lower.startsWith("set size")) {
     const p = parseFloat(lower.replace("set size", "").replace(/[$,]/g, "").trim());
     if (!Number.isFinite(p) || p <= 0) {
-      await ctx.sendTextReply("Give me a positive USD amount, e.g. set size 500");
+      await reply("Give me a positive USD amount, e.g. set size 500");
       return;
     }
     state.rules.maxPositionSizeUsd = p;
     saveUser(db, state);
-    await ctx.sendTextReply(`Done — max $${p} per position. I'll flag anything bigger.`);
+    await reply(`Done — max $${p} per position. I'll flag anything bigger.`);
     return;
   }
 
   if (lower === "status") {
-    await ctx.sendTextReply(statusText(state));
+    await reply(statusText(state));
     return;
   }
 
   if (lower === "score") {
     const s = computeDisciplineScore(state);
-    await ctx.sendTextReply(formatScoreCard(state.wallet, s));
+    await reply(formatScoreCard(state.wallet, s));
     return;
   }
 
   if (lower === "stop" || lower === "mute") {
     state.paused = true;
     saveUser(db, state);
-    await ctx.sendTextReply("Muted. I won't message you until you send resume.");
+    await reply("Muted. I won't message you until you send resume.");
     return;
   }
 
   if (lower === "resume" || lower === "start") {
     state.paused = false;
     saveUser(db, state);
-    await ctx.sendTextReply("Back on. I'll keep you honest.");
+    await reply("Back on. I'll keep you honest.");
     return;
   }
 
-  await ctx.sendTextReply(HELP);
+  await reply(HELP);
 }
 
 // --- background loops ---
 
+/**
+ * Catch-up sync: the live stream drops on flaky networks and messages that
+ * arrive in the gap are never re-emitted. Every cycle we sync from the network
+ * and answer anything recent that the stream missed (dedup via processedMessages
+ * keeps this exactly-once alongside the stream path).
+ */
+async function catchUpMissedMessages(agent: Agent): Promise<void> {
+  await agent.client.conversations.syncAll();
+  const myInboxId = agent.client.inboxId;
+  const convos = await agent.client.conversations.list();
+
+  for (const convo of convos) {
+    if (!filter.isDM(convo as never)) continue;
+    try {
+      const recent = await (convo as Conversation).messages({ limit: 10n } as never);
+      const pending = recent
+        .filter((m) => {
+          if (!m.id || processedMessages.has(m.id)) return false;
+          if (m.senderInboxId === myInboxId) return false;
+          if (typeof m.content !== "string") return false;
+          return Date.now() - messageSentAtMs(m) <= MAX_MESSAGE_AGE_MS;
+        })
+        .sort((a, b) => messageSentAtMs(a) - messageSentAtMs(b));
+
+      for (const m of pending) {
+        processedMessages.add(m.id);
+        await handleCommand(
+          (m.content as string).trim(),
+          m.senderInboxId,
+          convo as Conversation,
+          (t) => (convo as Conversation).sendText(t).then(() => undefined),
+        );
+      }
+    } catch (err) {
+      console.error("[catchup] conversation failed:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 /** The XMTP SDK re-emits "start" after every stream reconnect — loops must start once. */
 let loopsStarted = false;
 
-function startLoops(): void {
+function startLoops(agent: Agent): void {
   if (loopsStarted) return;
   loopsStarted = true;
   const client = createBaseClient();
+
+  // Missed-message catch-up: guarantees no DM goes unanswered even when the
+  // live stream is down. Overlap-guarded like the wallet poll.
+  let catchingUp = false;
+  setInterval(() => {
+    if (catchingUp) return;
+    catchingUp = true;
+    catchUpMissedMessages(agent)
+      .catch((err) =>
+        console.error("[catchup] cycle failed:", err instanceof Error ? err.message : err),
+      )
+      .finally(() => {
+        catchingUp = false;
+      });
+  }, 60_000);
 
   // Behavior-triggered: poll wallets and run heuristics.
   // Overlap guard: a slow RPC can make one cycle outlast the interval; running
@@ -514,7 +584,7 @@ async function main(): Promise<void> {
   agent.on("start", () => {
     console.log(`Discipline agent live on XMTP (${xmtpEnv}).`);
     console.log(`Agent address: ${agent.address ?? "unknown"}`);
-    void rehydrateConversations(agent).finally(() => startLoops());
+    void rehydrateConversations(agent).finally(() => startLoops(agent));
   });
 
   // Graceful shutdown: stop XMTP streams, close SQLite cleanly. The 5s timer
