@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-print-color-adjust: exact; }
+  body {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    background: #101014; color: #e8e8ea;
+    font-size: 10.5pt; line-height: 1.55;
+  }
+  .page { padding: 46px 52px; }
+
+  /* ---- cover header ---- */
+  .cover { text-align: center; padding: 60px 52px 40px; }
+  .dot { color: #2FE0D8; font-size: 44pt; line-height: 1; text-shadow: 0 0 26px rgba(47,224,216,.5); }
+  h1 { font-size: 30pt; letter-spacing: 2px; margin-top: 14px; font-weight: 800; }
+  .tagline { color: #9a9aa2; font-size: 12pt; margin-top: 6px; letter-spacing: 3px; text-transform: uppercase; }
+  .oneliner {
+    margin: 26px auto 0; max-width: 520px; color: #cfcfd6; font-size: 11.5pt;
+    border-top: 1px solid #26262e; border-bottom: 1px solid #26262e; padding: 16px 0;
+  }
+  .oneliner b { color: #2FE0D8; font-weight: 600; }
+
+  h2 {
+    color: #2FE0D8; font-size: 13pt; letter-spacing: 1.5px; text-transform: uppercase;
+    margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #26262e;
+  }
+  p { margin-bottom: 10px; color: #d6d6dc; }
+  b { color: #ffffff; }
+
+  .story {
+    background: #17171d; border-left: 3px solid #2FE0D8; border-radius: 6px;
+    padding: 16px 20px; margin: 12px 0; break-inside: avoid;
+  }
+  .story .big { font-size: 14pt; font-weight: 700; color: #fff; margin-bottom: 8px; }
+
+  .flow {
+    font-family: "SF Mono", Menlo, monospace; font-size: 8.6pt; line-height: 1.7;
+    background: #0b0b0f; border: 1px solid #26262e; border-radius: 8px;
+    padding: 16px 22px; color: #b9b9c2; white-space: pre; break-inside: avoid; margin: 10px 0;
+  }
+  .flow .c { color: #2FE0D8; }
+
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; break-inside: avoid; font-size: 9.5pt; }
+  th { text-align: left; color: #2FE0D8; font-size: 8.5pt; letter-spacing: 1px; text-transform: uppercase;
+       padding: 7px 10px; border-bottom: 1px solid #2FE0D8; }
+  td { padding: 7px 10px; border-bottom: 1px solid #1e1e26; color: #d6d6dc; vertical-align: top; }
+  td:first-child { color: #fff; font-weight: 600; white-space: nowrap; }
+  tr.hi td { background: #17171d; }
+  tr.hi td:nth-child(2) { color: #2FE0D8; }
+
+  .cmd {
+    font-family: "SF Mono", Menlo, monospace; font-size: 9.5pt;
+    background: #0b0b0f; border: 1px solid #26262e; border-radius: 8px;
+    padding: 14px 20px; margin: 10px 0; color: #e8e8ea; white-space: pre; break-inside: avoid;
+  }
+  .cmd .k { color: #2FE0D8; }
+  .cmd .g { color: #7ee787; }
+
+  ul.check { list-style: none; margin: 8px 0; }
+  ul.check li { padding: 3px 0 3px 24px; position: relative; color: #d6d6dc; }
+  ul.check li:before { content: "✓"; position: absolute; left: 2px; color: #2FE0D8; font-weight: 700; }
+
+  .quote {
+    margin: 24px 0; padding: 20px 26px; background: #17171d; border-radius: 8px;
+    border-left: 3px solid #2FE0D8; font-size: 12.5pt; line-height: 1.5; color: #fff;
+    font-weight: 600; break-inside: avoid;
+  }
+  .quote span { color: #2FE0D8; }
+
+  .footer {
+    margin-top: 26px; padding-top: 14px; border-top: 1px solid #26262e;
+    display: flex; justify-content: space-between; color: #9a9aa2; font-size: 9pt;
+  }
+  .footer b { color: #2FE0D8; font-weight: 600; }
+  .pagebreak { break-before: page; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="dot">●</div>
+  <h1>TradeCoach</h1>
+  <div class="tagline">The Base Discipline Agent</div>
+  <div class="oneliner">
+    An AI trading discipline coach that lives in Base App chat, watches your wallet
+    on-chain, and calls you out the moment you break <b>your own</b> trading rules.
+    It never tells you what to buy. <b>Refusing to — that's the whole point.</b>
+  </div>
+</div>
+
+<div class="page">
+  <h2>Why this exists</h2>
+  <div class="story">
+    <div class="big">I lost $300K to leveraged trading.</div>
+    <p>Not in one bad trade — in a pattern. A loss, then a bigger position to win it back.
+    Another loss, more leverage. Trading at 2 AM. Re-entering minutes after getting
+    liquidated, because <b>"I still had backup."</b> That backup feeling is the most expensive
+    lie in trading — the account that feels like a cushion today is the account that's
+    gone tomorrow.</p>
+    <p style="margin-bottom:0">When it was over, I understood: my problem was never strategy. It was psychology.
+    And every symptom of trading psychology is <b>visible on-chain</b> — the rapid-fire trades,
+    the size escalation after losses, the late-night entries, the revenge re-entry. It's all
+    in the wallet history, timestamped. So I built the thing I needed and didn't have.</p>
+  </div>
+
+  <h2>How it works</h2>
+  <div class="flow">You trade on Avantis / Aerodrome / Uniswap
+        <span class="c">↓</span>
+Everything lands on the Base blockchain
+        <span class="c">↓</span>
+The agent reads the chain every 60 seconds, computes real USD values
+        <span class="c">↓</span>
+Runs 10 behavior rules against YOUR plan — "did they break their own rule?"
+        <span class="c">↓</span>
+Rule broken → signal fires   <span class="c">(same signal max once per 4h — never spam)</span>
+        <span class="c">↓</span>
+A short, direct message hits your Base App DM  <span class="c">(encrypted via XMTP)</span></div>
+  <p><b>The non-negotiable design rule:</b> deterministic code decides <i>when</i> to message —
+  never the AI. The AI only picks the words. The agent can't get moody, can't overreach,
+  can't spam.</p>
+</div>
+
+<div class="page pagebreak">
+  <h2>The 10 patterns it catches</h2>
+  <table>
+    <tr><th>Signal</th><th>What it means</th></tr>
+    <tr><td>Frequency spike</td><td>6+ trades in an hour — classic tilt</td></tr>
+    <tr><td>Size escalation</td><td>Position jumps 1.5× right after a loss — loss-chasing</td></tr>
+    <tr><td>Late night</td><td>Trading inside your own no-trade hours</td></tr>
+    <tr><td>Token churn</td><td>4+ different tokens in 2 hours — FOMO rotation</td></tr>
+    <tr><td>Drawdown velocity</td><td>Portfolio dropping 20% fast — the panic zone</td></tr>
+    <tr><td>Daily limit broken</td><td>More trades than YOUR daily cap</td></tr>
+    <tr><td>Size limit broken</td><td>Bigger than YOUR max position</td></tr>
+    <tr><td>Leverage escalation</td><td>3× → 10× right after a losing close — revenge dressed as conviction</td></tr>
+    <tr class="hi"><td>Post-liquidation re-entry</td><td><b>New position within 30 minutes of a liquidation — the pattern that
+      turns one bad day into a zero. Highest severity.</b></td></tr>
+    <tr><td>Oversized vs. portfolio</td><td>One trade = 15%+ of your portfolio — the "I have backup" fallacy</td></tr>
+  </table>
+  <p>Plus a structured <b>liquidation post-mortem</b> when the worst happens, and exactly
+  <b>one</b> evening check-in per day — anti-notification-fatigue is a product rule.</p>
+
+  <h2>The Discipline Score (0–100)</h2>
+  <p>A rolling 14-day report card of plan adherence. Everyone starts at 100; violations
+  subtract (liquidation −25, revenge re-entry −20, oversized trade −10…). Send
+  <b>score</b>, get a shareable card. This later becomes an API — imagine perps platforms
+  seeing which traders are disciplined enough to last.</p>
+
+  <h2>Using it — 30 seconds</h2>
+  <div class="cmd"><span class="c">DM tradecoach.base.eth in Base App:</span>
+
+0xYourWallet        <span class="g">→ Step 1 ✓  (just paste your address)</span>
+set trades 5        <span class="g">→ Step 2 ✓  (your daily trade limit)</span>
+set size 500        <span class="g">→ Step 3 ✓  (your max position, USD)</span>
+
+<span class="c">Then trade like you normally do. You'll only hear from it
+when you break your own plan.</span>
+
+Commands: status · score · rules · stop / resume
+Ask "should I buy ETH?" — <span class="g">it refuses. Every time.</span></div>
+</div>
+
+<div class="page pagebreak">
+  <h2>Under the hood</h2>
+  <table>
+    <tr><th>Piece</th><th>What / Why</th></tr>
+    <tr><td>XMTP agent-sdk</td><td>Decentralized encrypted messaging — Base App chat runs on it; the agent is just a contact</td></tr>
+    <tr><td>viem</td><td>Reads the Base chain directly — trades, receipts, balances</td></tr>
+    <tr><td>Custom Avantis decoder</td><td>Perp opens, closes, <b>liquidations</b> — leverage is the real story</td></tr>
+    <tr><td>Price feed + receipts</td><td>Real USD per trade — size rules need dollars, not token amounts</td></tr>
+    <tr><td>Claude Haiku (optional)</td><td>Message wording, ~$0.001/message — agent runs fully free without it</td></tr>
+    <tr><td>SQLite (built-in)</td><td>Users, rules, trades, scores — restart-proof, zero dependencies</td></tr>
+    <tr><td>TypeScript + Node</td><td>31 automated tests + full e2e conversation test</td></tr>
+    <tr><td>launchd + watchdog</td><td>Self-healing process — crashes recover in 10 seconds</td></tr>
+  </table>
+  <p>Running cost today: <b>~$0/month.</b> At 100 users: ~$16/month.</p>
+
+  <h2>Shipped so far</h2>
+  <ul class="check">
+    <li>Full agent live on <b>XMTP production</b> — working in Base App right now</li>
+    <li>On-chain name: <b>tradecoach.base.eth</b></li>
+    <li>First user onboarded — validation phase running</li>
+    <li>Open source (MIT): <b>github.com/Saurabhtiwari531/base-discipline-agent</b></li>
+    <li>Demo video with sound design, brand assets</li>
+    <li>Hardened by real-user testing — reply storms, silent stream drops and crash loops found &amp; fixed</li>
+  </ul>
+
+  <h2>What's next</h2>
+  <table>
+    <tr><td>NOW</td><td>20 test traders from Avantis / Aerodrome communities → 2 weeks</td></tr>
+    <tr><td>GATE</td><td>If 10+ don't mute the agent → keep building</td></tr>
+    <tr><td>THEN</td><td>Base ecosystem grants (Builder Rewards + Builder Grants)</td></tr>
+    <tr><td>THEN</td><td>B2B for perps platforms: liquidated users churn forever, disciplined users generate fees for years — a retention tool</td></tr>
+    <tr class="hi"><td>HERO</td><td><b>Hard Mode:</b> a Solidity commitment contract — lock your own rules on-chain; breaking them requires a 24-hour timelock. Crypto-native self-exclusion.</td></tr>
+    <tr><td>LATER</td><td>Squad mode (group accountability) + Discipline Score API</td></tr>
+  </table>
+
+  <div class="quote">
+    "An agent that gives you signals is just another thing to blame.<br>
+    <span>TradeCoach enforces the only edge you actually control — your own discipline.</span>"
+  </div>
+
+  <div class="footer">
+    <div>Try it → DM <b>tradecoach.base.eth</b> on Base App</div>
+    <div>Code → <b>github.com/Saurabhtiwari531/base-discipline-agent</b></div>
+  </div>
+</div>
+
+</body>
+</html>
