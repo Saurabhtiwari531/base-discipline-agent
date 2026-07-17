@@ -87,16 +87,16 @@ const ADDRESS_ANYWHERE = /0x[a-fA-F0-9]{40}/;
 const GREETING = /^(hi|hii+|hello|hey|yo|gm|gn|namaste|sup|hola)\b[\s!.]*$/i;
 
 const HELP = [
-  "⌘ Commands",
-  "━━━━━━━━━━━━━━",
-  "watch 0x…  →  wallet I monitor",
-  "set trades N  →  your daily trade limit",
-  "set size P  →  max position (USD)",
-  "set size auto  →  I size it from your portfolio",
-  "rules  →  your plan",
-  "status  →  today at a glance",
-  "score  →  14-day discipline score",
-  "stop / resume  →  mute · unmute",
+  "You can send me any of these:",
+  "",
+  "• watch 0x123… — start watching that wallet",
+  "• set trades 5 — your daily trade limit",
+  "• set size 500 — your max position size in dollars",
+  "• auto — I'll set your size from your portfolio",
+  "• rules — see your plan",
+  "• status — how today is going",
+  "• score — your discipline report card",
+  "• stop / resume — mute me / unmute me",
 ].join("\n");
 
 function shortAddr(a: string): string {
@@ -105,20 +105,16 @@ function shortAddr(a: string): string {
 
 function rulesText(state: UserState): string {
   const r = state.rules;
-  const size = r.maxPositionSizeUsd > 0 ? `$${r.maxPositionSizeUsd}` : "not set";
+  const size = r.maxPositionSizeUsd > 0 ? `max $${r.maxPositionSizeUsd} per position` : "no size limit set yet (send: auto)";
   return [
-    "📋 Your plan",
-    "━━━━━━━━━━━━━━",
-    `Trades/day  ·  max ${r.maxTradesPerDay}`,
-    `Position    ·  max ${size}`,
-    `No-trade    ·  ${r.noTradeStartHour}:00 → ${r.noTradeEndHour}:00`,
+    "📋 Your plan:",
+    "",
+    `1. Max ${r.maxTradesPerDay} trades per day`,
+    `2. ${size.charAt(0).toUpperCase() + size.slice(1)}`,
+    `3. No trading between ${r.noTradeStartHour}:00 and ${r.noTradeEndHour}:00`,
+    "",
+    "I message you only when you break one of these.",
   ].join("\n");
-}
-
-/** ▰▰▰▰▰▰▰▱▱▱ style meter for 0-100 values. */
-function meter(value: number, max: number): string {
-  const filled = Math.round((Math.max(0, Math.min(value, max)) / max) * 10);
-  return "▰".repeat(filled) + "▱".repeat(10 - filled);
 }
 
 function statusText(state: UserState): string {
@@ -128,14 +124,17 @@ function statusText(state: UserState): string {
   const s = computeDisciplineScore(state);
   const used = todays.length;
   const cap = state.rules.maxTradesPerDay;
+  const withinPlan = used <= cap && !state.paused;
   return [
-    "📊 Today",
-    "━━━━━━━━━━━━━━",
-    `Wallet  ·  ${shortAddr(state.wallet)}`,
-    `Trades  ·  ${meter(used, cap)}  ${used}/${cap}`,
-    `Score   ·  ${s.score}/100 — ${scoreLabel(s.score)}`,
-    state.paused ? "State   ·  🔇 muted (send resume)" : "State   ·  🟢 watching",
-  ].join("\n");
+    "📊 Status:",
+    "",
+    `Watching wallet: ${shortAddr(state.wallet)}`,
+    `Trades today: ${used} of ${cap} allowed`,
+    `Discipline score: ${s.score}/100 (${scoreLabel(s.score)})`,
+    state.paused ? "Agent: muted 🔇 — send resume to turn me back on" : "Agent: watching 🟢",
+    "",
+    withinPlan ? "You're inside your plan today. 👍" : "",
+  ].join("\n").trim();
 }
 
 function isSameLocalDay(aMs: number | undefined, bMs: number): boolean {
@@ -336,9 +335,20 @@ async function handleCommand(
     const size = Math.max(10, Math.round((snapUsd * 0.1) / 5) * 5);
     state.rules.maxPositionSizeUsd = size;
     saveUser(db, state);
-    const head = firstTime ? "Step 3 done ✓ Auto-sized." : "Auto-sized ✓";
+    const head = firstTime ? "Step 3 done ✓" : "Done ✓";
     await reply(
-      `${head}\n\nPortfolio  ·  ~$${Math.round(snapUsd)}\nMax size   ·  $${size} (10%)\n\nOne bad trade stays survivable — that's the point. Change anytime: set size 300${firstTime ? "\n\nThat's your plan — I'm watching now. Try: score" : ""}`,
+      [
+        head,
+        "",
+        `Your portfolio right now: ~$${Math.round(snapUsd)}`,
+        `So your max position is set to: $${size} (that's 10% of it)`,
+        "",
+        "Why 10%? So one bad trade can never seriously hurt you.",
+        "You can change it anytime — e.g. set size 300",
+        firstTime ? "\nYour plan is fully set — I'm watching now. Send score to see your report card." : "",
+      ]
+        .join("\n")
+        .trim(),
     );
     return;
   }

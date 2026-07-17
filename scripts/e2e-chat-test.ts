@@ -92,7 +92,7 @@ async function main(): Promise<void> {
       expect: /Watching 0x4200/i,
     },
     { label: "rules", send: "rules", expect: /Your plan/i },
-    { label: "status", send: "status", expect: /Trades\s+·/i },
+    { label: "status", send: "status", expect: /Trades today/i },
     { label: "score", send: "score", expect: /Discipline Score: 100\/100/i },
     {
       label: "refusal",

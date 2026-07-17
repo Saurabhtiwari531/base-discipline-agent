@@ -182,12 +182,6 @@ function shortWallet(wallet: string): string {
   return wallet.length > 12 ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : wallet;
 }
 
-/** ▰▰▰▰▰▰▰▰▱▱ meter for the score. */
-function scoreMeter(score: number): string {
-  const filled = Math.round((Math.max(0, Math.min(score, 100)) / 100) * 10);
-  return "▰".repeat(filled) + "▱".repeat(10 - filled);
-}
-
 /**
  * Shareable text card (Farcaster-ready). Factual and minimal — the image card
  * comes later; this text must stand on its own.
@@ -195,14 +189,14 @@ function scoreMeter(score: number): string {
 export function formatScoreCard(wallet: string, s: DisciplineScore): string {
   const lines = [
     `🛡 Discipline Score: ${s.score}/100 — ${scoreLabel(s.score)}`,
-    scoreMeter(s.score),
-    "━━━━━━━━━━━━━━",
+    "",
     `${s.windowDays}-day plan adherence · ${shortWallet(wallet)}`,
     `${s.tradesObserved} trade(s) observed`,
   ];
   if (s.breakdown.length === 0) {
     lines.push("No plan violations in the window.");
   } else {
+    lines.push("Points lost:");
     for (const item of s.breakdown) {
       lines.push(`· ${item.label}: ${item.count} (${item.points})`);
     }
