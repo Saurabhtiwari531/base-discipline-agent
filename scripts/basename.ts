@@ -11,6 +11,7 @@
  *   L2Resolver          0x426fA03fB86E510d0Dd9F70335Cf102a98b10875
  */
 import "dotenv/config";
+import { readFileSync } from "node:fs";
 import {
   createPublicClient,
   createWalletClient,
@@ -37,20 +38,65 @@ const controllerAbi = parseAbi([
   "function register((string name, address owner, uint256 duration, address resolver, bytes[] data, bool reverseRecord, uint256[] coinTypes, uint256 signatureExpiry, bytes signature) request) payable",
 ]);
 
-const resolverAbi = parseAbi(["function setAddr(bytes32 node, address a)"]);
+const resolverAbi = parseAbi([
+  "function setAddr(bytes32 node, address a)",
+  "function setText(bytes32 node, string key, string value)",
+]);
+
+const MIME_BY_EXT: Record<string, string> = {
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+};
 
 async function main() {
-  const [, , cmd, name] = process.argv;
+  const [, , cmd, name, extra] = process.argv;
   if (!cmd || !name) {
-    console.error("usage: basename.ts <check|register> <name>");
+    console.error("usage: basename.ts <check|register|avatar> <name> [path-to-image]");
     process.exit(1);
   }
 
   const walletKey = process.env.WALLET_KEY as `0x${string}` | undefined;
   if (!walletKey) throw new Error("WALLET_KEY missing in .env");
   const account = privateKeyToAccount(walletKey);
-
   const publicClient = createPublicClient({ chain: base, transport: http(process.env.BASE_RPC_URL) });
+
+  // Avatar doesn't need the availability/price lookup below — the name is
+  // already owned by this wallet by the time you're setting a picture for it.
+  if (cmd === "avatar") {
+    if (!extra) throw new Error("usage: basename.ts avatar <name> <path-to-image>");
+    const ext = extra.split(".").pop()?.toLowerCase() ?? "";
+    const mime = MIME_BY_EXT[ext];
+    if (!mime) throw new Error(`unsupported image type .${ext} — use .svg, .png, or .jpg`);
+
+    const bytes = readFileSync(extra);
+    const dataUri = `data:${mime};base64,${bytes.toString("base64")}`;
+    console.log(`image:           ${extra} (${bytes.length} bytes)`);
+    console.log(`data URI:        ${dataUri.length} chars`);
+
+    const node = namehash(`${name}.base.eth`);
+    await publicClient.simulateContract({
+      account,
+      address: L2_RESOLVER,
+      abi: resolverAbi,
+      functionName: "setText",
+      args: [node, "avatar", dataUri],
+    });
+
+    const walletClient = createWalletClient({ account, chain: base, transport: http(process.env.BASE_RPC_URL) });
+    const hash = await walletClient.writeContract({
+      address: L2_RESOLVER,
+      abi: resolverAbi,
+      functionName: "setText",
+      args: [node, "avatar", dataUri],
+    });
+    console.log(`avatar tx:       ${hash}`);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    console.log(`status:          ${receipt.status} (block ${receipt.blockNumber})`);
+    return;
+  }
+
   const [available, price, balance] = await Promise.all([
     publicClient.readContract({ address: CONTROLLER, abi: controllerAbi, functionName: "available", args: [name] }),
     publicClient.readContract({ address: CONTROLLER, abi: controllerAbi, functionName: "registerPrice", args: [name, YEAR_SECONDS] }),
